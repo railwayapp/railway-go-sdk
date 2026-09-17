@@ -2,8 +2,10 @@
 // It builds the same conceptual RailwayGraph as railway/iac (TypeScript).
 // Plan/apply stay in the CLI; this package has no Config as Code knowledge.
 //
-// Prefer one file that owns the whole environment. Declare
-// `const Partial = "api"` only when split repos cannot share a file.
+// One repository for the whole environment: one file, no partial. One
+// repository per service: one file per repository, each declaring
+// `const Partial = "<name>"` so the CLI tracks which partial owns each
+// resource. See https://docs.railway.com/infrastructure-as-code#multi-repo-projects
 package railway
 
 import (
