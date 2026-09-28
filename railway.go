@@ -328,6 +328,11 @@ func serviceNode(name string, config ServiceConfig) map[string]any {
 			node[key] = value
 		}
 	}
+	// Per-environment tracing switches: {"enabled": bool, "autoInstrumentation": bool}.
+	// Railway serialises an untraced service without a block, so no switches is no block.
+	if tracing := prune(asMap(config["tracing"])); tracing != nil {
+		node["tracing"] = tracing
+	}
 	return node
 }
 
