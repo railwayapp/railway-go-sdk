@@ -96,3 +96,35 @@ func TestRefAndPreserve(t *testing.T) {
 		t.Fatalf("bucket")
 	}
 }
+
+func TestTracing(t *testing.T) {
+	web := ServiceNamed("web", ServiceConfig{
+		"start":   "./app",
+		"tracing": map[string]any{"enabled": true, "autoInstrumentation": true},
+	})
+	tracing, _ := web.Graph()["tracing"].(map[string]any)
+	if tracing["enabled"] != true || tracing["autoInstrumentation"] != true {
+		t.Fatalf("tracing: %v", web.Graph()["tracing"])
+	}
+
+	worker := Fn("worker", ServiceConfig{"tracing": map[string]any{"enabled": true}})
+	tracing, _ = worker.Graph()["tracing"].(map[string]any)
+	if worker.Graph()["kind"] != "function" || tracing["enabled"] != true {
+		t.Fatalf("function tracing: %v", worker.Graph())
+	}
+
+	// No switches is no block; nil switches are dropped.
+	empty := ServiceNamed("empty", ServiceConfig{"tracing": map[string]any{}})
+	if _, ok := empty.Graph()["tracing"]; ok {
+		t.Fatalf("empty tracing: %v", empty.Graph()["tracing"])
+	}
+	partial := ServiceNamed("partial", ServiceConfig{"tracing": map[string]any{"enabled": true, "autoInstrumentation": nil}})
+	tracing, _ = partial.Graph()["tracing"].(map[string]any)
+	if len(tracing) != 1 || tracing["enabled"] != true {
+		t.Fatalf("partial tracing: %v", tracing)
+	}
+
+	if _, ok := Postgres("db").Graph()["tracing"]; ok {
+		t.Fatalf("database carries tracing")
+	}
+}

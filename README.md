@@ -21,6 +21,8 @@ func Railway() railway.Project {
     "env": map[string]any{
       "DATABASE_URL": db.Env("DATABASE_URL"),
     },
+    // Per-environment tracing switches; omit the block to leave tracing off.
+    "tracing": map[string]any{"enabled": true, "autoInstrumentation": true},
   })
   return railway.ProjectNamed("my-app", []any{db, web})
 }
