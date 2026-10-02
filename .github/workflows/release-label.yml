@@ -1,0 +1,29 @@
+name: Release Label
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, labeled, unlabeled, ready_for_review]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  release-label:
+    name: Require release label
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check release label
+        env:
+          LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -euo pipefail
+          VALID="release/patch, release/minor, release/major, release/skip"
+          FOUND=$(echo "$LABELS" | jq -r '.[] | select(. == "release/patch" or . == "release/minor" or . == "release/major" or . == "release/skip")')
+          COUNT=$(echo "$FOUND" | grep -c . || true)
+
+          if [ "$COUNT" -ne 1 ]; then
+            echo "::error::Expected exactly one release label ($VALID); found $COUNT: ${FOUND:-none}"
+            exit 1
+          fi
+
+          echo "Release label: $FOUND"
