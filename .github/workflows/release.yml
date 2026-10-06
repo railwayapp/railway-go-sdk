@@ -1,0 +1,127 @@
+name: Release
+
+# Reusable: tags the next version on main and publishes a GitHub release.
+# Called by auto-release.yml (label-triggered) and create-release.yml (manual).
+# Go has no version file, so a release is just a tag plus release notes; the
+# Go module proxy serves the module straight from the tag.
+
+on:
+  workflow_call:
+    inputs:
+      bump:
+        description: Version bump type (patch, minor, major)
+        required: true
+        type: string
+
+jobs:
+  release:
+    name: Tag and release
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Compute version
+        id: version
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+          MODULE=$(sed -n 's/^module //p' go.mod)
+          LAST_TAG=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || echo "")
+          BASE="${LAST_TAG:-v0.0.0}"
+          IFS=. read -r MAJOR MINOR PATCH <<< "${BASE#v}"
+
+          case "$BUMP" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+            *) echo "::error::Unknown bump type: $BUMP"; exit 1 ;;
+          esac
+
+          TAG="v$MAJOR.$MINOR.$PATCH"
+          echo "Module: $MODULE"
+          echo "Previous tag: ${LAST_TAG:-none}"
+          echo "Next tag: $TAG ($BUMP)"
+
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "::error::Tag $TAG already exists"
+            exit 1
+          fi
+
+          # Go modules at v2+ must carry the major version in the module path.
+          if [ "$MAJOR" -ge 2 ] && [[ "$MODULE" != */v$MAJOR ]]; then
+            echo "::error::$TAG requires the module path in go.mod to end in /v$MAJOR (currently $MODULE). Change the module path first, then release."
+            exit 1
+          fi
+
+          {
+            echo "module=$MODULE"
+            echo "previous_tag=$LAST_TAG"
+            echo "tag=$TAG"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create and push tag
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git tag "$TAG"
+          git push origin "$TAG"
+
+      - name: Build changelog
+        id: changelog
+        uses: mikepenz/release-changelog-builder-action@v5
+        with:
+          configuration: ".github/changelog-configuration.json"
+          fromTag: ${{ steps.version.outputs.previous_tag }}
+          toTag: ${{ steps.version.outputs.tag }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          draft: false
+          prerelease: false
+          body: ${{ steps.changelog.outputs.changelog }}
+
+      - name: Wait for the Go module proxy
+        env:
+          MODULE: ${{ steps.version.outputs.module }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # Uppercase letters in module paths are escaped as "!x" on the proxy.
+          # shellcheck disable=SC2001
+          ESCAPED=$(echo "$MODULE" | sed 's/\([A-Z]\)/!\L\1/g')
+          URL="https://proxy.golang.org/$ESCAPED/@v/$TAG.info"
+          echo "Requesting $URL"
+
+          for i in {1..20}; do
+            if curl -fsS "$URL"; then
+              echo
+              echo "$MODULE@$TAG is available on proxy.golang.org"
+              exit 0
+            fi
+            echo "Not yet available (attempt $i), retrying in 15s"
+            sleep 15
+          done
+
+          echo "::error::Timed out waiting for $MODULE@$TAG on proxy.golang.org"
+          exit 1
