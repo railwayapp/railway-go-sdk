@@ -1,6 +1,10 @@
 package railway
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
 
 func TestProjectGraph(t *testing.T) {
 	web := ServiceNamed("web", ServiceConfig{
@@ -32,10 +36,10 @@ func TestProjectGraph(t *testing.T) {
 func TestGithubEnvAndGroup(t *testing.T) {
 	db := Postgres("db")
 	api := ServiceNamed("api", ServiceConfig{
-		"source":  Github("org/api"),
-		"start":   "./api",
-		"env":     map[string]any{"DATABASE_URL": db.Env("DATABASE_URL"), "NAME": "api"},
-		"domains": []any{"api.example.com"},
+		"source":   Github("org/api"),
+		"start":    "./api",
+		"env":      map[string]any{"DATABASE_URL": db.Env("DATABASE_URL"), "NAME": "api"},
+		"domains":  []any{"api.example.com"},
 		"replicas": 2,
 	})
 	data := Volume("data")
@@ -94,6 +98,155 @@ func TestRefAndPreserve(t *testing.T) {
 	}
 	if Bucket("assets").Address() != "bucket.assets" {
 		t.Fatalf("bucket")
+	}
+}
+
+func TestProjectVariables(t *testing.T) {
+	graph := ProjectNamed("demo", []any{}, ProjectConfig{
+		Variables: &VariablesPolicy{Managed: true, Ignore: []string{"FOO"}},
+	}).Graph()
+	raw, err := json.Marshal(graph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Variables struct {
+			Managed bool     `json:"managed"`
+			Ignore  []string `json:"ignore"`
+		} `json:"variables"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.Variables.Managed || len(payload.Variables.Ignore) != 1 || payload.Variables.Ignore[0] != "FOO" {
+		t.Fatalf("variables: %s", raw)
+	}
+
+	if _, ok := ProjectNamed("demo", []any{}).Graph()["variables"]; ok {
+		t.Fatal("policy omitted should not emit variables")
+	}
+
+	empty := ProjectNamed("demo", []any{}, ProjectConfig{Variables: &VariablesPolicy{}}).Graph()
+	raw, err = json.Marshal(empty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Variables.Managed || len(payload.Variables.Ignore) != 0 {
+		t.Fatalf("empty policy: %s", raw)
+	}
+	if !strings.Contains(string(raw), `"ignore":[]`) {
+		t.Fatalf("ignore null: %s", raw)
+	}
+}
+
+func TestContextPR(t *testing.T) {
+	var ctx Context
+	if err := json.Unmarshal([]byte(`{"environment":"pr-12","pr":{"number":12,"branch":"feat","base":"main"}}`), &ctx); err != nil {
+		t.Fatal(err)
+	}
+	if ctx.Environment != "pr-12" || ctx.PR == nil || ctx.PR.Number != 12 || ctx.PR.Branch != "feat" || ctx.PR.Base != "main" {
+		t.Fatalf("ctx: %+v pr=%+v", ctx, ctx.PR)
+	}
+	web := ServiceNamed("web", ServiceConfig{"env": map[string]any{"PR_BRANCH": ctx.PR.Branch}})
+	graph := ProjectNamed("demo", []any{web}).Graph()
+	raw, err := json.Marshal(graph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"feat"`) {
+		t.Fatalf("pr did not reach payload: %s", raw)
+	}
+
+	var none Context
+	if err := json.Unmarshal([]byte(`{"environmentName":"production"}`), &none); err != nil {
+		t.Fatal(err)
+	}
+	if none.PR != nil || none.Environment != "production" {
+		t.Fatalf("none: %+v", none)
+	}
+	var nullPR Context
+	if err := json.Unmarshal([]byte(`{"pr":null}`), &nullPR); err != nil {
+		t.Fatal(err)
+	}
+	if nullPR.PR != nil {
+		t.Fatal("null pr")
+	}
+}
+
+func TestEnvironments(t *testing.T) {
+	envs := []string{"production", "staging"}
+	svc := ServiceNamed("web", ServiceConfig{"environments": envs, "start": "./app"}).Graph()
+	db := Postgres("db", map[string]any{"environments": envs}).Graph()
+	bucket := Bucket("assets", map[string]any{"environments": envs, "region": "sjc"}).Graph()
+	vol := Volume("data", map[string]any{"environments": envs, "sizeMB": 10}).Graph()
+	grouped := Group("app", []any{}, map[string]any{"environments": envs, "color": "blue"})
+	groupNode := grouped[0].(Resource).Graph()
+
+	for _, node := range []map[string]any{svc, db, bucket, vol, groupNode} {
+		got, _ := node["environments"].([]string)
+		if len(got) != 2 || got[0] != "production" || got[1] != "staging" {
+			t.Fatalf("environments on %v: %v", node["address"], node["environments"])
+		}
+	}
+	cfg := vol["config"].(map[string]any)
+	if _, ok := cfg["environments"]; ok || cfg["sizeMB"] != 10 {
+		t.Fatalf("volume config: %v", cfg)
+	}
+	bucketCfg := bucket["config"].(map[string]any)
+	if _, ok := bucketCfg["environments"]; ok || bucketCfg["region"] != "sjc" {
+		t.Fatalf("bucket config: %v", bucketCfg)
+	}
+	if groupNode["color"] != "blue" {
+		t.Fatalf("group: %v", groupNode)
+	}
+
+	raw, err := json.Marshal(ProjectNamed("demo", []any{
+		ServiceNamed("web", ServiceConfig{"environments": envs}),
+		Postgres("db", map[string]any{"environments": envs}),
+		Bucket("assets", map[string]any{"environments": envs}),
+		Volume("data", map[string]any{"environments": envs}),
+		Group("app", []any{}, map[string]any{"environments": envs}),
+	}).Graph())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"environments":["production","staging"]`) {
+		t.Fatalf("payload: %s", raw)
+	}
+}
+
+func TestGithubBranchless(t *testing.T) {
+	owned := Github("org/app")
+	if _, ok := owned["branch"]; ok || owned["repo"] != "org/app" || owned["type"] != "github" {
+		t.Fatalf("owned: %v", owned)
+	}
+	node := ServiceNamed("web", ServiceConfig{"source": owned}).Graph()
+	source := node["source"].(map[string]any)
+	if _, ok := source["branch"]; ok {
+		t.Fatalf("payload branch: %v", source)
+	}
+	raw, err := json.Marshal(node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "branch") {
+		t.Fatalf("branch in payload: %s", raw)
+	}
+
+	pinned := Github("org/app", map[string]any{"branch": "dev", "rootDirectory": "api"})
+	if pinned["branch"] != "dev" || pinned["rootDirectory"] != "api" {
+		t.Fatalf("pinned: %v", pinned)
+	}
+	rawMap := ServiceNamed("raw", ServiceConfig{"source": map[string]any{"repo": "org/app"}}).Graph()
+	if _, ok := rawMap["source"].(map[string]any)["branch"]; ok {
+		t.Fatalf("raw source defaulted branch: %v", rawMap["source"])
+	}
+	empty := Github("org/app", map[string]any{"branch": ""})
+	if _, ok := empty["branch"]; ok {
+		t.Fatalf("empty branch: %v", empty)
 	}
 }
 

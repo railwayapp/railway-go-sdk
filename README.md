@@ -41,6 +41,60 @@ require github.com/railwayapp/railway-go-sdk v0.2.0
 
 Config as Code migration: `railway config migrate --lang go`.
 
+## Project variables
+
+Shared project variables are a project policy, not a service setting. Pass
+`ProjectConfig` to `ProjectNamed`. Omitted, the file does not declare a policy.
+The evaluated payload is `project.variables`: `{"managed": bool, "ignore": []string}`.
+`managed` claims shared project variables for this file. `ignore` lists names
+left untouched. Service `variables` / `env` are still that service's variables.
+
+```go
+return railway.ProjectNamed("my-app", []any{web}, railway.ProjectConfig{
+  Variables: &railway.VariablesPolicy{
+    Managed: true,
+    Ignore:  []string{"STRIPE_KEY"},
+  },
+})
+```
+
+## Pull request context
+
+`railway.Context.PR` is nil when the IaC context JSON has no `pr` object.
+Otherwise it is decoded from `pr` (`number`, `branch`, `base`).
+
+```go
+func Railway(ctx railway.Context) railway.Project {
+  if ctx.PR != nil {
+    // ctx.PR.Number, ctx.PR.Branch, ctx.PR.Base
+  }
+  return railway.ProjectNamed("my-app", []any{})
+}
+```
+
+## Environments
+
+`environments` (`[]string`) on a service, database, bucket, volume, or group
+is emitted as `environments` on that resource. Omit it to leave the field unset.
+
+```go
+web := railway.ServiceNamed("web", railway.ServiceConfig{
+  "environments": []string{"production", "staging"},
+})
+```
+
+## GitHub source
+
+`Github(repo)` with no `branch` is environment-owned: Railway uses the branch
+connected to the environment (a pull-request environment tracks the PR) instead
+of a branch pinned in this file. Pass `branch` to pin one. An empty branch is
+the same as omitting it.
+
+```go
+railway.Github("org/app")                              // environment-owned
+railway.Github("org/app", map[string]any{"branch": "main"}) // pinned
+```
+
 ## Multi-repo projects
 
 A named partial lets each repository manage its own slice of a Railway
