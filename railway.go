@@ -6,11 +6,26 @@
 // repository per service: one file per repository, each declaring
 // `const Partial = "<name>"` so the CLI tracks which partial owns each
 // resource. See https://docs.railway.com/infrastructure-as-code#multi-repo-projects
+//
+// ProjectNamed takes an optional ProjectConfig. Variables there is the
+// project-level variables policy, emitted as project.variables
+// {"managed": bool, "ignore": []string}. Service "variables" are environment
+// variables; there is no per-service policy.
+//
+// Context unmarshals the IaC context JSON. PR is nil, or a PullRequest
+// when that JSON has a "pr" object {"number", "branch", "base"}.
+//
+// Service, database, bucket, volume, and group configs accept "environments"
+// ([]string). It is emitted as environments on that resource.
+//
+// Github without a branch leaves branch unset: the environment owns the
+// branch (a pull-request environment tracks the PR). Set branch to pin one.
 package railway
 
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"strconv"
 	"strings"
 )
@@ -72,10 +87,26 @@ func (r Resource) Env(output string) map[string]any {
 type Project struct {
 	Name      string
 	Resources []any
+	Variables *VariablesPolicy
 }
 
-func ProjectNamed(name string, resources []any) Project {
-	return Project{Name: name, Resources: flatten(resources)}
+// VariablesPolicy is the project-level shared-variable policy.
+// Managed claims those variables for this file. Ignore names are left alone.
+type VariablesPolicy struct {
+	Managed bool
+	Ignore  []string
+}
+
+type ProjectConfig struct {
+	Variables *VariablesPolicy
+}
+
+func ProjectNamed(name string, resources []any, config ...ProjectConfig) Project {
+	p := Project{Name: name, Resources: flatten(resources)}
+	if len(config) > 0 {
+		p.Variables = config[0].Variables
+	}
+	return p
 }
 
 func (p Project) Graph() map[string]any {
@@ -83,10 +114,18 @@ func (p Project) Graph() map[string]any {
 	for _, r := range flatten(p.Resources) {
 		resources = append(resources, graphOf(r))
 	}
-	return map[string]any{
+	out := map[string]any{
 		"name":      p.Name,
 		"resources": resources,
 	}
+	if p.Variables != nil {
+		ignore := p.Variables.Ignore
+		if ignore == nil {
+			ignore = []string{}
+		}
+		out["variables"] = map[string]any{"managed": p.Variables.Managed, "ignore": ignore}
+	}
+	return out
 }
 
 func Github(repo string, options ...map[string]any) map[string]any {
@@ -94,11 +133,11 @@ func Github(repo string, options ...map[string]any) map[string]any {
 	if _, ok := opts["autoUpdates"]; ok {
 		panic("Image auto updates are only supported for Docker image sources.")
 	}
-	branch := "main"
-	if value, ok := opts["branch"].(string); ok && value != "" {
-		branch = value
+	// No branch means the environment owns it. Do not default to main.
+	out := map[string]any{"type": "github", "repo": repo}
+	if branch, ok := opts["branch"].(string); ok && branch != "" {
+		out["branch"] = branch
 	}
-	out := map[string]any{"type": "github", "repo": repo, "branch": branch}
 	for k, v := range opts {
 		if k != "branch" {
 			out[k] = v
@@ -198,25 +237,38 @@ func Database(name, engine string, options ...map[string]any) Resource {
 			"multiRegionConfig": map[string]any{region: map[string]any{"numReplicas": 1}},
 		}
 	}
+	if envs, ok := opts["environments"]; ok && envs != nil {
+		node["environments"] = envs
+	}
 	return Resource{node: node}
 }
 
 func Volume(name string, config ...map[string]any) Resource {
-	return Resource{node: map[string]any{
+	cfg, envs := splitEnvironments(firstMap(config))
+	node := map[string]any{
 		"address": "volume." + name,
 		"type":    "volume",
 		"name":    name,
-		"config":  firstMap(config),
-	}}
+		"config":  cfg,
+	}
+	if envs != nil {
+		node["environments"] = envs
+	}
+	return Resource{node: node}
 }
 
 func Bucket(name string, config ...map[string]any) Resource {
-	return Resource{node: map[string]any{
+	cfg, envs := splitEnvironments(firstMap(config))
+	node := map[string]any{
 		"address": "bucket." + name,
 		"type":    "bucket",
 		"name":    name,
-		"config":  firstMap(config),
-	}}
+		"config":  cfg,
+	}
+	if envs != nil {
+		node["environments"] = envs
+	}
+	return Resource{node: node}
 }
 
 func Group(name string, resources []any, options ...map[string]any) []any {
@@ -240,13 +292,21 @@ func Preserve() map[string]any {
 	return map[string]any{"type": "preserve"}
 }
 
+// PullRequest is the pull request that owns the current environment, if any.
+type PullRequest struct {
+	Number int    `json:"number"`
+	Branch string `json:"branch"`
+	Base   string `json:"base"`
+}
+
 type Context struct {
-	Command         string
-	ProjectID       string
-	ProjectName     string
-	EnvironmentID   string
-	Environment     string
-	EnvironmentName string
+	Command         string       `json:"command,omitempty"`
+	ProjectID       string       `json:"projectId,omitempty"`
+	ProjectName     string       `json:"projectName,omitempty"`
+	EnvironmentID   string       `json:"environmentId,omitempty"`
+	Environment     string       `json:"environment,omitempty"`
+	EnvironmentName string       `json:"environmentName,omitempty"`
+	PR              *PullRequest `json:"pr,omitempty"`
 }
 
 func NewContext(input Context) Context {
@@ -257,6 +317,32 @@ func NewContext(input Context) Context {
 	input.Environment = environment
 	input.EnvironmentName = environment
 	return input
+}
+
+func (c *Context) UnmarshalJSON(data []byte) error {
+	type wire struct {
+		Command         string       `json:"command"`
+		ProjectID       string       `json:"projectId"`
+		ProjectName     string       `json:"projectName"`
+		EnvironmentID   string       `json:"environmentId"`
+		Environment     string       `json:"environment"`
+		EnvironmentName string       `json:"environmentName"`
+		PR              *PullRequest `json:"pr"`
+	}
+	var raw wire
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*c = NewContext(Context{
+		Command:         raw.Command,
+		ProjectID:       raw.ProjectID,
+		ProjectName:     raw.ProjectName,
+		EnvironmentID:   raw.EnvironmentID,
+		Environment:     raw.Environment,
+		EnvironmentName: raw.EnvironmentName,
+		PR:              raw.PR,
+	})
+	return nil
 }
 
 func (c Context) RandomString(label string, bytes int) string {
@@ -271,7 +357,7 @@ func (c Context) RandomString(label string, bytes int) string {
 		environment = "default"
 	}
 	sum := sha256.Sum256([]byte("railway-iac:" + environment + ":" + label))
-	return hex.EncodeToString(sum[:])[: bytes*2]
+	return hex.EncodeToString(sum[:])[:bytes*2]
 }
 
 func (c Context) IsEnvironment(name string) bool {
@@ -323,7 +409,7 @@ func serviceNode(name string, config ServiceConfig) map[string]any {
 	for k, v := range normalizeVolumeMounts(config["volumeMounts"]) {
 		node[k] = v
 	}
-	for _, key := range []string{"configFile", "parentServiceId", "groupId", "clusterRole", "replicaConfig", "clusterDisplay"} {
+	for _, key := range []string{"configFile", "parentServiceId", "groupId", "clusterRole", "replicaConfig", "clusterDisplay", "environments"} {
 		if value, ok := config[key]; ok && value != nil {
 			node[key] = value
 		}
@@ -351,11 +437,11 @@ func normalizeSource(source any, rootDirectory string) map[string]any {
 		return prune(src)
 	}
 	if repo, ok := src["repo"].(string); ok && repo != "" {
-		branch := "main"
-		if value, ok := src["branch"].(string); ok && value != "" {
-			branch = value
+		out := map[string]any{"type": "github", "repo": repo, "rootDirectory": emptyToNil(rootDirectory)}
+		if branch, ok := src["branch"].(string); ok && branch != "" {
+			out["branch"] = branch
 		}
-		return prune(map[string]any{"type": "github", "repo": repo, "branch": branch, "rootDirectory": emptyToNil(rootDirectory)})
+		return prune(out)
 	}
 	if imageName, ok := src["image"].(string); ok && imageName != "" {
 		return prune(map[string]any{"type": "image", "image": imageName, "rootDirectory": emptyToNil(rootDirectory)})
@@ -638,6 +724,15 @@ func firstMap(options []map[string]any) map[string]any {
 
 func mergeOpts(base map[string]any, options ...map[string]any) map[string]any {
 	return mergeMaps(base, firstMap(options))
+}
+
+func splitEnvironments(config map[string]any) (map[string]any, any) {
+	envs := config["environments"]
+	delete(config, "environments")
+	if envs == nil {
+		return config, nil
+	}
+	return config, envs
 }
 
 func mergeMaps(base map[string]any, extra map[string]any) map[string]any {
