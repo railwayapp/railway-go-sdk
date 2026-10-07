@@ -14,15 +14,21 @@ jobs:
     steps:
       - name: Check release label
         env:
-          LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
+          # Event payload is frozen at dispatch, so a label added after open
+          # would leave the original check failed. Read the live set.
+          LABELS=$(gh api "repos/${REPO}/issues/${PR}/labels" --jq '[.[].name]')
           VALID="release/patch, release/minor, release/major, release/skip"
           FOUND=$(echo "$LABELS" | jq -r '.[] | select(. == "release/patch" or . == "release/minor" or . == "release/major" or . == "release/skip")')
           COUNT=$(echo "$FOUND" | grep -c . || true)
 
           if [ "$COUNT" -ne 1 ]; then
             echo "::error::Expected exactly one release label ($VALID); found $COUNT: ${FOUND:-none}"
+            echo "Labels: $LABELS"
             exit 1
           fi
 
