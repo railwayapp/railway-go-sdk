@@ -34,6 +34,7 @@ func ExampleFn() {
 		"codeFile": "testdata/hook.ts",
 	})
 	graph := hook.Graph()
-	fmt.Println(graph["kind"], graph["source"].(map[string]any)["image"])
-	// Output: function ghcr.io/railwayapp/function-bun:1.4.0
+	source := graph["source"].(map[string]any)
+	fmt.Println(graph["kind"], source["image"] == railway.FunctionImages["bun"])
+	// Output: function true
 }

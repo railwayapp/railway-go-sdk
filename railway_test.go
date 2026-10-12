@@ -328,6 +328,8 @@ func TestFnPanics(t *testing.T) {
 	mustPanic(t, func() { Fn("f", ServiceConfig{"codeFile": 42}) })
 	mustPanic(t, func() { Fn("f", ServiceConfig{"codeFile": "testdata/hook.ts", "start": "./app"}) })
 	mustPanic(t, func() { Fn("f", ServiceConfig{"codeFile": "testdata/hook.ts", "startCommand": "./app"}) })
+	mustPanic(t, func() { Fn("f", ServiceConfig{"codeFile": "testdata/hook.ts", "run": map[string]any{"command": "./app"}}) })
+	mustPanic(t, func() { Fn("f", ServiceConfig{"codeFile": "testdata/hook.ts", "deploy": map[string]any{"startCommand": "./app"}}) })
 	mustPanic(t, func() { Fn("f", ServiceConfig{"runtime": "bun", "source": Image("nginx")}) })
 	msg := mustPanic(t, func() { Fn("f", ServiceConfig{"codeFile": "testdata/hook.ts", "runtime": "deno"}) })
 	if msg != `Unknown function runtime "deno"; supported runtimes: bun.` {

@@ -380,10 +380,13 @@ const FunctionSourceMaxBytes = 96 * 1024
 //
 //   - "codeFile": path of the function's source file. A relative path is
 //     resolved against the directory of the Go file that calls Fn (the config
-//     file, so "hook.ts" is the file next to railway.go). Fn reads the file
-//     when the config is evaluated and encodes it into the deploy start
-//     command (see FunctionStartCommand), so "codeFile" and "start" are
-//     mutually exclusive.
+//     file, so "hook.ts" is the file next to railway.go; a helper in another
+//     file resolves against that helper, and a -trimpath build falls back to
+//     the working directory, which the CLI sets to the config directory). Fn
+//     reads the file when the config is evaluated and encodes it into the
+//     deploy start command (see FunctionStartCommand), so "codeFile" and any
+//     start command ("start", "startCommand", "run.command" or
+//     "deploy.startCommand") are mutually exclusive.
 //   - "runtime": a key of FunctionImages, "bun" by default. Fn sets the source
 //     to that runtime's image. To pin another image version, pass "source"
 //     with Image("ghcr.io/railwayapp/function-bun:1.2.16") instead of "runtime".
@@ -404,7 +407,7 @@ func Fn(name string, config ServiceConfig) Service {
 		if !ok || path == "" {
 			panic("Function codeFile must be a non-empty path.")
 		}
-		if firstNonNil(input["start"], input["startCommand"]) != nil {
+		if firstNonNil(input["start"], input["startCommand"], asMap(input["run"])["command"], asMap(input["deploy"])["startCommand"]) != nil {
 			panic("Function codeFile and a start command are mutually exclusive: the code is the start command.")
 		}
 		input["start"] = FunctionStartCommand(readFunctionCode(resolveCallerPath(path)))
@@ -461,11 +464,11 @@ func resolveCallerPath(path string) string {
 	return path
 }
 
-func functionImage(runtime any) string {
-	if runtime == nil {
-		runtime = "bun"
+func functionImage(requested any) string {
+	if requested == nil {
+		requested = "bun"
 	}
-	if name, ok := runtime.(string); ok {
+	if name, ok := requested.(string); ok {
 		if image, found := FunctionImages[name]; found {
 			return image
 		}
@@ -475,7 +478,7 @@ func functionImage(runtime any) string {
 		known = append(known, key)
 	}
 	sort.Strings(known)
-	panic(fmt.Sprintf("Unknown function runtime %q; supported runtimes: %s.", fmt.Sprint(runtime), strings.Join(known, ", ")))
+	panic(fmt.Sprintf("Unknown function runtime %q; supported runtimes: %s.", fmt.Sprint(requested), strings.Join(known, ", ")))
 }
 
 func Postgres(name string, options ...map[string]any) Resource {
