@@ -36,7 +36,7 @@ module railway-config
 
 go 1.22
 
-require github.com/railwayapp/railway-go-sdk v0.2.0
+require github.com/railwayapp/railway-go-sdk v0.5.0
 ```
 
 Config as Code migration: `railway config migrate --lang go`.
@@ -73,6 +73,56 @@ nginx := railway.ServiceNamed("nginx", railway.ServiceConfig{
 other registries and `railway.Github` never accepts it. The raw
 `map[string]any` form that `railway config pull` writes out is still accepted
 and validated the same way.
+
+## CDN
+
+CDN caching is set per service and per environment, for the service's public
+domains. The settings live on the edge and apply without a deploy. Pass a
+`railway.ServiceCdn` value as the `cdn` option of a service:
+
+```go
+web := railway.ServiceNamed("web", railway.ServiceConfig{
+  "cdn": railway.ServiceCdn{Enabled: true},
+})
+
+swr := false
+docs := railway.ServiceNamed("docs", railway.ServiceConfig{
+  "cdn": railway.ServiceCdn{
+    Enabled:              true,
+    DefaultTtlSeconds:    86400,
+    HtmlCaching:          railway.ServiceCdnHtmlCachingForce,
+    StaleWhileRevalidate: &swr,
+    PurgeOnDeploy:        railway.ServiceCdnPurgeOnDeployAll,
+  },
+})
+```
+
+`Enabled` caches responses from the service's public domains at Railway's
+edge. It needs a public domain and cannot be combined with Railway
+Authentication. The other knobs tune the cache and each has a default:
+
+- `DefaultTtlSeconds`: how long the edge keeps a cacheable response without
+  `Cache-Control` headers of its own, in seconds. Defaults to `7200`.
+- `HtmlCaching`: whether HTML documents are cached.
+  `railway.ServiceCdnHtmlCachingAuto` follows the response headers, `Force`
+  caches them regardless, `Never` leaves them uncached. Defaults to `auto`.
+- `StaleWhileRevalidate`: honour `stale-while-revalidate` `Cache-Control`
+  directives, serving a stale copy while the edge refreshes it. A `*bool`
+  because the default is `true`; `nil` leaves the default.
+- `PurgeOnDeploy`: what a successful deploy purges from the cache.
+  `railway.ServiceCdnPurgeOnDeployHtml` keeps immutable assets warm, `All`
+  clears everything, `Off` purges nothing. Defaults to `html`.
+
+Railway serialises the block only while caching is on, and only the knobs that
+differ from the defaults. Leaving the block out, `Enabled: false` and `nil`
+all mean the same thing: no caching, and no drift in `railway config plan`.
+`ServiceCdn{Enabled: true}` is a service caching with the defaults, so a knob
+set to its default does not plan as drift either. The raw `map[string]any`
+form that `railway config pull` writes out is accepted and validated the same
+way.
+
+Requires a Railway CLI that compiles `cdn`. Older CLIs drop the block when
+compiling the config.
 
 ## Multi-repo projects
 

@@ -27,3 +27,16 @@ func ExampleAutoUpdates() {
 	fmt.Println(string(out))
 	// Output: {"schedule":[{"day":6,"endHour":6,"startHour":2}],"type":"patch"}
 }
+
+func ExampleServiceCdn() {
+	docs := railway.ServiceNamed("docs", railway.ServiceConfig{
+		"cdn": railway.ServiceCdn{
+			Enabled:           true,
+			DefaultTtlSeconds: 86400,
+			HtmlCaching:       railway.ServiceCdnHtmlCachingForce,
+		},
+	})
+	out, _ := json.Marshal(docs.Graph()["cdn"])
+	fmt.Println(string(out))
+	// Output: {"defaultTtlSeconds":86400,"enabled":true,"htmlCaching":"force"}
+}
