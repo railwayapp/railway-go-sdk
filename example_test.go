@@ -16,8 +16,9 @@ func ExampleProjectNamed() {
 }
 
 func ExampleFn() {
+	// Relative to this file: testdata/hook.ts next to example_test.go.
 	hook := railway.Fn("hook", railway.ServiceConfig{
-		"code": `export default { fetch: () => new Response("ok") };`,
+		"codeFile": "testdata/hook.ts",
 	})
 	graph := hook.Graph()
 	fmt.Println(graph["kind"], graph["source"].(map[string]any)["image"])

@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	railway "github.com/railwayapp/railway-go-sdk"
 )
 
 // Matches the CLI's evaluate_go wrapper: go run railway.go railway_iac_eval_main.go
@@ -34,9 +36,13 @@ const Partial = "api"
 
 func Railway() railway.Project {
 	web := railway.ServiceNamed("api", railway.ServiceConfig{"start": "echo api"})
-	return railway.ProjectNamed("app", []any{web})
+	hook := railway.Fn("hook", railway.ServiceConfig{"codeFile": "hook.ts"})
+	return railway.ProjectNamed("app", []any{web, hook})
 }
 `), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "hook.ts"), []byte("export {}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "railway_iac_eval_main.go"), []byte(`package main
@@ -67,11 +73,16 @@ func main() {
 		t.Fatalf("partial: %q", payload.Partial)
 	}
 	resources, _ := payload.Project["resources"].([]any)
-	if len(resources) != 1 {
+	if len(resources) != 2 {
 		t.Fatalf("resources: %v", payload.Project["resources"])
 	}
 	node := resources[0].(map[string]any)
 	if node["address"] != "service.api" {
 		t.Fatalf("node: %v", node)
+	}
+	hook := resources[1].(map[string]any)
+	deploy, _ := hook["deploy"].(map[string]any)
+	if hook["kind"] != "function" || deploy["startCommand"] != railway.FunctionStartCommand("export {}") {
+		t.Fatalf("hook: %v", hook)
 	}
 }
