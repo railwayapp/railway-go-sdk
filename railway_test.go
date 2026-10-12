@@ -304,12 +304,18 @@ func TestFnCodeFile(t *testing.T) {
 }
 
 func TestFnCodeLimit(t *testing.T) {
+	// The kernel caps one argv entry at 128 KiB; after the "./run.sh " prefix
+	// the base64 has room for 98295 source bytes. Railway derives the same.
+	if FunctionSourceMaxBytes != 98295 {
+		t.Fatalf("limit: %d", FunctionSourceMaxBytes)
+	}
 	atLimit := strings.Repeat("a", FunctionSourceMaxBytes)
-	if !strings.HasPrefix(FunctionStartCommand(atLimit), "./run.sh ") {
-		t.Fatalf("at limit")
+	command := FunctionStartCommand(atLimit)
+	if !strings.HasPrefix(command, "./run.sh ") || len(command) > 128*1024-1 {
+		t.Fatalf("at limit: %d bytes", len(command))
 	}
 	msg := mustPanic(t, func() { FunctionStartCommand(atLimit + "a") })
-	if msg != "Function source code is 97 KB; the limit is 96 KB" {
+	if msg != "Function source code is 98296 bytes; the limit is 98295 bytes" {
 		t.Fatalf("limit message: %q", msg)
 	}
 	// Through a file, and in bytes, not runes: a multi-byte character counts
@@ -318,7 +324,7 @@ func TestFnCodeLimit(t *testing.T) {
 	if err := os.WriteFile(big, []byte(strings.Repeat("é", FunctionSourceMaxBytes/2+1)), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if msg := mustPanic(t, func() { Fn("big", ServiceConfig{"codeFile": big}) }); !strings.HasPrefix(msg, "Function source code is 97 KB") {
+	if msg := mustPanic(t, func() { Fn("big", ServiceConfig{"codeFile": big}) }); msg != "Function source code is 98296 bytes; the limit is 98295 bytes" {
 		t.Fatalf("file limit message: %q", msg)
 	}
 }

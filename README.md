@@ -102,11 +102,12 @@ railway.Fn("hook", railway.ServiceConfig{
 })
 ```
 
-The source is limited to 96 KB (`railway.FunctionSourceMaxBytes`): the whole
-payload is one argument of the start command. `Fn` panics past that, with the
-same error Railway returns on apply. `codeFile` and `start` are mutually
-exclusive — `railway.FunctionStartCommand(code)` builds the start command from
-a string on its own.
+The source is limited to 98,295 bytes of UTF-8 (`railway.FunctionSourceMaxBytes`,
+just under 96 KB): the whole payload is one argument of the start command, the
+kernel caps a single argument at 128 KiB, and the base64 has to fit after the
+`./run.sh ` prefix. `Fn` panics past that, with the same error Railway returns
+on apply. `codeFile` and `start` are mutually exclusive — `railway.FunctionStartCommand(code)`
+builds the start command from a string on its own.
 
 ## Multi-repo projects
 

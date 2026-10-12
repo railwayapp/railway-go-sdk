@@ -368,11 +368,17 @@ var FunctionImages = map[string]string{
 	"bun": FunctionImagePrefix + "bun:1.4.0",
 }
 
-// FunctionSourceMaxBytes is the ceiling on a function's source. The whole
-// base64 payload is one argv entry of the container's start command, so the
-// kernel's 128 KiB per-argument limit caps the decoded source at 96 KB. Railway
-// rejects larger functions on apply; Fn and FunctionStartCommand panic first.
-const FunctionSourceMaxBytes = 96 * 1024
+// functionStartCommandPrefix is what run.sh in the function image expects in
+// front of the base64 source.
+const functionStartCommandPrefix = "./run.sh "
+
+// FunctionSourceMaxBytes is the ceiling on a function's source, in UTF-8 bytes:
+// 98295, just under 96 KB. The whole base64 payload is one argv entry of the
+// container's start command, the kernel caps a single argument at 128 KiB, and
+// the base64 has to fit after the "./run.sh " prefix. Railway derives the same
+// limit and rejects larger functions on apply; Fn and FunctionStartCommand
+// panic first.
+const FunctionSourceMaxBytes = (128*1024 - 1 - len(functionStartCommandPrefix)) / 4 * 3
 
 // Fn declares a Railway Function: a single-file service that runs on a
 // function runtime image with no repository or build step. It accepts every
@@ -432,9 +438,9 @@ func Fn(name string, config ServiceConfig) Service {
 // Railway returns.
 func FunctionStartCommand(code string) string {
 	if len(code) > FunctionSourceMaxBytes {
-		panic(fmt.Sprintf("Function source code is %d KB; the limit is %d KB", (len(code)+1023)/1024, FunctionSourceMaxBytes/1024))
+		panic(fmt.Sprintf("Function source code is %d bytes; the limit is %d bytes", len(code), FunctionSourceMaxBytes))
 	}
-	return "./run.sh " + base64.StdEncoding.EncodeToString([]byte(code))
+	return functionStartCommandPrefix + base64.StdEncoding.EncodeToString([]byte(code))
 }
 
 func readFunctionCode(path string) string {
