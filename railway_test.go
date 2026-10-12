@@ -1,6 +1,9 @@
 package railway
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestProjectGraph(t *testing.T) {
 	web := ServiceNamed("web", ServiceConfig{
@@ -127,4 +130,92 @@ func TestTracing(t *testing.T) {
 	if _, ok := Postgres("db").Graph()["tracing"]; ok {
 		t.Fatalf("database carries tracing")
 	}
+}
+
+func TestImageAutoUpdates(t *testing.T) {
+	expectPanic := func(name string, fn func()) {
+		t.Helper()
+		defer func() {
+			if recover() == nil {
+				t.Fatalf("%s: expected panic", name)
+			}
+		}()
+		fn()
+	}
+	window := func(got any) map[string]any {
+		t.Helper()
+		schedule, _ := got.([]any)
+		if len(schedule) != 1 {
+			t.Fatalf("schedule: %v", got)
+		}
+		return schedule[0].(map[string]any)
+	}
+
+	typed := Image("nginx:latest", map[string]any{"autoUpdates": AutoUpdates{
+		Type:     AutoUpdatesPatch,
+		Schedule: []AutoUpdateWindow{{Day: 6, StartHour: 2, EndHour: 6}},
+	}})
+	auto, _ := typed["autoUpdates"].(map[string]any)
+	if auto["type"] != "patch" || len(auto) != 2 {
+		t.Fatalf("typed autoUpdates: %v", auto)
+	}
+	if w := window(auto["schedule"]); w["day"] != 6 || w["startHour"] != 2 || w["endHour"] != 6 {
+		t.Fatalf("typed window: %v", w)
+	}
+
+	// The raw map form keeps working and is normalised to the same graph.
+	raw := Image("ghcr.io/acme/api:1", map[string]any{"autoUpdates": map[string]any{
+		"type":     "patch",
+		"schedule": []any{map[string]any{"day": 6, "startHour": 2, "endHour": 6}},
+	}})
+	if !reflect.DeepEqual(raw["autoUpdates"], typed["autoUpdates"]) {
+		t.Fatalf("raw %v != typed %v", raw["autoUpdates"], typed["autoUpdates"])
+	}
+	// JSON-decoded numbers are floats; integral ones are accepted.
+	floats := Image("nginx", map[string]any{"autoUpdates": map[string]any{
+		"schedule": []any{map[string]any{"day": 0.0, "startHour": 0.0, "endHour": 24.0}},
+	}})
+	if w := window(floats["autoUpdates"].(map[string]any)["schedule"]); w["day"] != 0 || w["endHour"] != 24 {
+		t.Fatalf("float window: %v", w)
+	}
+
+	// Zero values are omitted; a nil schedule leaves the window unset.
+	policyOnly := Image("nginx", map[string]any{"autoUpdates": AutoUpdates{Type: AutoUpdatesMinor}})
+	if got := policyOnly["autoUpdates"]; !reflect.DeepEqual(got, map[string]any{"type": "minor"}) {
+		t.Fatalf("policy only: %v", got)
+	}
+	if _, ok := Image("nginx", map[string]any{"autoUpdates": AutoUpdates{}})["autoUpdates"]; ok {
+		t.Fatalf("empty AutoUpdates should be dropped")
+	}
+
+	expectPanic("day 7", func() {
+		Image("nginx", map[string]any{"autoUpdates": AutoUpdates{Schedule: []AutoUpdateWindow{{Day: 7, StartHour: 0, EndHour: 1}}}})
+	})
+	expectPanic("startHour 24", func() {
+		Image("nginx", map[string]any{"autoUpdates": AutoUpdates{Schedule: []AutoUpdateWindow{{Day: 1, StartHour: 24, EndHour: 24}}}})
+	})
+	expectPanic("endHour 25", func() {
+		Image("nginx", map[string]any{"autoUpdates": AutoUpdates{Schedule: []AutoUpdateWindow{{Day: 1, StartHour: 0, EndHour: 25}}}})
+	})
+	expectPanic("end before start", func() {
+		Image("nginx", map[string]any{"autoUpdates": AutoUpdates{Schedule: []AutoUpdateWindow{{Day: 1, StartHour: 6, EndHour: 6}}}})
+	})
+	expectPanic("bad policy", func() {
+		Image("nginx", map[string]any{"autoUpdates": AutoUpdates{Type: "weekly"}})
+	})
+	expectPanic("raw bad window", func() {
+		Image("nginx", map[string]any{"autoUpdates": map[string]any{"schedule": []any{map[string]any{"day": 6, "startHour": 2}}}})
+	})
+	expectPanic("raw unknown field", func() {
+		Image("nginx", map[string]any{"autoUpdates": map[string]any{"schedule": []any{map[string]any{"day": 6, "startHour": 2, "endHour": 6, "tz": "UTC"}}}})
+	})
+	expectPanic("raw bad shape", func() {
+		Image("nginx", map[string]any{"autoUpdates": "patch"})
+	})
+	expectPanic("unsupported registry", func() {
+		Image("quay.io/acme/api", map[string]any{"autoUpdates": AutoUpdates{Type: AutoUpdatesPatch}})
+	})
+	expectPanic("github source", func() {
+		Github("acme/api", map[string]any{"autoUpdates": AutoUpdates{Type: AutoUpdatesPatch}})
+	})
 }

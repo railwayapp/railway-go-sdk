@@ -107,6 +107,10 @@ func Github(repo string, options ...map[string]any) map[string]any {
 	return prune(out)
 }
 
+// Image declares a Docker image source. Options are spread into the source
+// node. The "autoUpdates" option takes an AutoUpdates value (or the equivalent
+// raw map) and is validated; it is only supported for Docker Hub and GHCR
+// images, Image panics otherwise.
 func Image(imageName string, options ...map[string]any) map[string]any {
 	opts := firstMap(options)
 	if _, ok := opts["autoUpdates"]; ok && !supportsImageAutoUpdates(imageName) {
@@ -116,7 +120,220 @@ func Image(imageName string, options ...map[string]any) map[string]any {
 	for k, v := range opts {
 		out[k] = v
 	}
+	if value, ok := opts["autoUpdates"]; ok {
+		if normalized := normalizeAutoUpdates(value); normalized != nil {
+			out["autoUpdates"] = normalized
+		} else {
+			delete(out, "autoUpdates")
+		}
+	}
 	return prune(out)
+}
+
+// AutoUpdatesType is the image auto update policy.
+type AutoUpdatesType string
+
+const (
+	// AutoUpdatesDisabled turns image auto updates off.
+	AutoUpdatesDisabled AutoUpdatesType = "disabled"
+	// AutoUpdatesPatch follows patch releases of the image tag.
+	AutoUpdatesPatch AutoUpdatesType = "patch"
+	// AutoUpdatesMinor follows minor and patch releases of the image tag.
+	AutoUpdatesMinor AutoUpdatesType = "minor"
+)
+
+// AutoUpdates configures image auto updates for a Docker Hub or GHCR image
+// source. Pass it as the "autoUpdates" option of Image:
+//
+//	railway.Image("nginx:latest", map[string]any{
+//		"autoUpdates": railway.AutoUpdates{
+//			Type:     railway.AutoUpdatesPatch,
+//			Schedule: []railway.AutoUpdateWindow{{Day: 6, StartHour: 2, EndHour: 6}},
+//		},
+//	})
+//
+// Mirrors source.autoUpdates in the environment config: Type is the update
+// policy, Schedule the weekly UTC maintenance windows updates may run in, and
+// TagMode ("semver" or "sha") how new tags are matched. Zero values are
+// omitted from the graph; a nil Schedule leaves the window unset.
+type AutoUpdates struct {
+	Type     AutoUpdatesType
+	Schedule []AutoUpdateWindow
+	TagMode  string
+}
+
+// AutoUpdateWindow is one weekly UTC window in which scheduled image auto
+// updates may run. Same shape as the GraphQL AutoUpdateScheduleWindowInput.
+type AutoUpdateWindow struct {
+	// Day is the UTC weekday, 0 (Sunday) through 6 (Saturday).
+	Day int
+	// StartHour is the UTC hour the window opens (inclusive), 0 through 23.
+	StartHour int
+	// EndHour is the UTC hour the window closes (exclusive), 1 through 24. It
+	// must be greater than StartHour.
+	EndHour int
+}
+
+func (w AutoUpdateWindow) graph() map[string]any {
+	if w.Day < 0 || w.Day > 6 {
+		panic("Invalid maintenance window: day must be 0 (Sunday) through 6 (Saturday) UTC, got " + strconv.Itoa(w.Day) + ".")
+	}
+	if w.StartHour < 0 || w.StartHour > 23 {
+		panic("Invalid maintenance window: startHour must be 0 through 23 UTC, got " + strconv.Itoa(w.StartHour) + ".")
+	}
+	if w.EndHour < 1 || w.EndHour > 24 {
+		panic("Invalid maintenance window: endHour must be 1 through 24 UTC, got " + strconv.Itoa(w.EndHour) + ".")
+	}
+	if w.EndHour <= w.StartHour {
+		panic("Invalid maintenance window: endHour must be greater than startHour.")
+	}
+	return map[string]any{"day": w.Day, "startHour": w.StartHour, "endHour": w.EndHour}
+}
+
+// normalizeAutoUpdates turns the "autoUpdates" option of Image into the graph
+// shape, accepting the typed AutoUpdates struct or the raw map form, and
+// validates the policy and every maintenance window either way.
+func normalizeAutoUpdates(value any) map[string]any {
+	var out map[string]any
+	switch v := value.(type) {
+	case nil:
+		return nil
+	case AutoUpdates:
+		out = map[string]any{}
+		if v.Type != "" {
+			out["type"] = v.Type
+		}
+		if v.Schedule != nil {
+			out["schedule"] = v.Schedule
+		}
+		if v.TagMode != "" {
+			out["tagMode"] = v.TagMode
+		}
+	case *AutoUpdates:
+		if v == nil {
+			return nil
+		}
+		return normalizeAutoUpdates(*v)
+	case map[string]any:
+		out = cloneMap(v)
+	default:
+		panic("Image autoUpdates must be a railway.AutoUpdates value or a map[string]any.")
+	}
+
+	if raw, ok := out["type"]; ok && raw != nil {
+		var policy string
+		switch t := raw.(type) {
+		case AutoUpdatesType:
+			policy = string(t)
+		case string:
+			policy = t
+		default:
+			panic("Image autoUpdates.type must be \"disabled\", \"patch\" or \"minor\".")
+		}
+		switch AutoUpdatesType(policy) {
+		case AutoUpdatesDisabled, AutoUpdatesPatch, AutoUpdatesMinor:
+			out["type"] = policy
+		default:
+			panic("Image autoUpdates.type must be \"disabled\", \"patch\" or \"minor\", got " + strconv.Quote(policy) + ".")
+		}
+	}
+	if raw, ok := out["tagMode"]; ok && raw != nil {
+		mode, isString := raw.(string)
+		if !isString || (mode != "semver" && mode != "sha") {
+			panic("Image autoUpdates.tagMode must be \"semver\" or \"sha\".")
+		}
+	}
+	if raw, ok := out["schedule"]; ok && raw != nil {
+		out["schedule"] = normalizeAutoUpdateSchedule(raw)
+	}
+	return prune(out)
+}
+
+func normalizeAutoUpdateSchedule(value any) []any {
+	var windows []any
+	switch v := value.(type) {
+	case []AutoUpdateWindow:
+		for _, w := range v {
+			windows = append(windows, w)
+		}
+	case []map[string]any:
+		for _, w := range v {
+			windows = append(windows, w)
+		}
+	case []any:
+		windows = v
+	default:
+		panic("Image autoUpdates.schedule must be a list of railway.AutoUpdateWindow values.")
+	}
+	out := make([]any, 0, len(windows))
+	for _, raw := range windows {
+		var window AutoUpdateWindow
+		switch w := raw.(type) {
+		case AutoUpdateWindow:
+			window = w
+		case map[string]any:
+			for key := range w {
+				if key != "day" && key != "startHour" && key != "endHour" {
+					panic("Invalid maintenance window: unknown field " + strconv.Quote(key) + ".")
+				}
+			}
+			window = AutoUpdateWindow{
+				Day:       windowField(w, "day"),
+				StartHour: windowField(w, "startHour"),
+				EndHour:   windowField(w, "endHour"),
+			}
+		default:
+			panic("Image autoUpdates.schedule entries must be railway.AutoUpdateWindow values.")
+		}
+		out = append(out, window.graph())
+	}
+	return out
+}
+
+func windowField(window map[string]any, key string) int {
+	raw, ok := window[key]
+	if !ok {
+		panic("Invalid maintenance window: missing " + key + ".")
+	}
+	value, ok := asInt(raw)
+	if !ok {
+		panic("Invalid maintenance window: " + key + " must be an integer.")
+	}
+	return value
+}
+
+func asInt(value any) (int, bool) {
+	switch v := value.(type) {
+	case int:
+		return v, true
+	case int8:
+		return int(v), true
+	case int16:
+		return int(v), true
+	case int32:
+		return int(v), true
+	case int64:
+		return int(v), true
+	case uint:
+		return int(v), true
+	case uint8:
+		return int(v), true
+	case uint16:
+		return int(v), true
+	case uint32:
+		return int(v), true
+	case uint64:
+		return int(v), true
+	case float32:
+		if float32(int(v)) == v {
+			return int(v), true
+		}
+	case float64:
+		if float64(int(v)) == v {
+			return int(v), true
+		}
+	}
+	return 0, false
 }
 
 func Template(templateName string, options ...map[string]any) map[string]any {
