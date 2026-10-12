@@ -1,6 +1,11 @@
 package railway
 
-import "testing"
+import (
+	"encoding/base64"
+	"fmt"
+	"strings"
+	"testing"
+)
 
 func TestProjectGraph(t *testing.T) {
 	web := ServiceNamed("web", ServiceConfig{
@@ -127,4 +132,101 @@ func TestTracing(t *testing.T) {
 	if _, ok := Postgres("db").Graph()["tracing"]; ok {
 		t.Fatalf("database carries tracing")
 	}
+}
+
+func TestFnCode(t *testing.T) {
+	code := "export default { fetch: () => new Response(\"ok\") };"
+	worker := Fn("worker", ServiceConfig{
+		"code": code,
+		"env":  map[string]any{"NAME": "worker"},
+	})
+	node := worker.Graph()
+	if node["kind"] != "function" {
+		t.Fatalf("kind: %v", node["kind"])
+	}
+	source, _ := node["source"].(map[string]any)
+	if source["type"] != "image" || source["image"] != FunctionImages["bun"] {
+		t.Fatalf("source: %v", source)
+	}
+	deploy, _ := node["deploy"].(map[string]any)
+	start, _ := deploy["startCommand"].(string)
+	if !strings.HasPrefix(start, "./run.sh ") {
+		t.Fatalf("startCommand: %q", start)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(start, "./run.sh "))
+	if err != nil || string(decoded) != code {
+		t.Fatalf("decoded: %q %v", decoded, err)
+	}
+	if _, ok := node["code"]; ok {
+		t.Fatalf("code leaked into the graph: %v", node)
+	}
+	if _, ok := node["runtime"]; ok {
+		t.Fatalf("runtime leaked into the graph: %v", node)
+	}
+	// The caller's config is neither mutated nor replaced.
+	if worker.Config["code"] != code {
+		t.Fatalf("config: %v", worker.Config)
+	}
+	variables := node["variables"].(map[string]any)
+	if variables["NAME"].(map[string]any)["value"] != "worker" {
+		t.Fatalf("variables: %v", variables)
+	}
+
+	// Explicit runtime, and an explicit source to pin another image version.
+	explicit := Fn("explicit", ServiceConfig{"code": code, "runtime": "bun"}).Graph()
+	if explicit["source"].(map[string]any)["image"] != FunctionImages["bun"] {
+		t.Fatalf("explicit runtime: %v", explicit["source"])
+	}
+	pinned := Fn("pinned", ServiceConfig{
+		"code":   code,
+		"source": Image("ghcr.io/railwayapp/function-bun:1.2.16"),
+	}).Graph()
+	if pinned["source"].(map[string]any)["image"] != "ghcr.io/railwayapp/function-bun:1.2.16" {
+		t.Fatalf("pinned source: %v", pinned["source"])
+	}
+
+	// No code and no runtime is the old behaviour: a function node with
+	// whatever the caller declared, and no synthesised source.
+	plain := Fn("plain", ServiceConfig{"start": "./run.sh abc"}).Graph()
+	if _, ok := plain["source"]; ok || plain["kind"] != "function" {
+		t.Fatalf("plain: %v", plain)
+	}
+}
+
+func TestFnCodeLimit(t *testing.T) {
+	atLimit := strings.Repeat("a", FunctionSourceMaxBytes)
+	if !strings.HasPrefix(FunctionStartCommand(atLimit), "./run.sh ") {
+		t.Fatalf("at limit")
+	}
+	msg := mustPanic(t, func() { FunctionStartCommand(atLimit + "a") })
+	if msg != "Function source code is 97 KB; the limit is 96 KB" {
+		t.Fatalf("limit message: %q", msg)
+	}
+	// Bytes, not runes: a multi-byte character counts its UTF-8 width.
+	mustPanic(t, func() { Fn("big", ServiceConfig{"code": strings.Repeat("é", FunctionSourceMaxBytes/2+1)}) })
+}
+
+func TestFnPanics(t *testing.T) {
+	mustPanic(t, func() { Fn("f", ServiceConfig{"code": ""}) })
+	mustPanic(t, func() { Fn("f", ServiceConfig{"code": 42}) })
+	mustPanic(t, func() { Fn("f", ServiceConfig{"code": "x", "start": "./app"}) })
+	mustPanic(t, func() { Fn("f", ServiceConfig{"code": "x", "startCommand": "./app"}) })
+	mustPanic(t, func() { Fn("f", ServiceConfig{"runtime": "bun", "source": Image("nginx")}) })
+	msg := mustPanic(t, func() { Fn("f", ServiceConfig{"code": "x", "runtime": "deno"}) })
+	if msg != `Unknown function runtime "deno"; supported runtimes: bun.` {
+		t.Fatalf("runtime message: %q", msg)
+	}
+}
+
+func mustPanic(t *testing.T, fn func()) (message string) {
+	t.Helper()
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			t.Fatalf("expected a panic")
+		}
+		message = fmt.Sprint(recovered)
+	}()
+	fn()
+	return ""
 }

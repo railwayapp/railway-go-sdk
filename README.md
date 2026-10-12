@@ -41,6 +41,37 @@ require github.com/railwayapp/railway-go-sdk v0.2.0
 
 Config as Code migration: `railway config migrate --lang go`.
 
+## Functions
+
+A Railway Function is a single file of TypeScript that runs on the Bun runtime
+image with no repository or build step. `railway.Fn` takes the source under
+`code` and compiles it into the function image plus a base64-encoded start
+command, the same shape the dashboard and `railway functions push` produce:
+
+```go
+hook := railway.Fn("hook", railway.ServiceConfig{
+  "code": `export default { fetch: () => new Response("ok") };`,
+  "env":  map[string]any{"SECRET": railway.Shared("WEBHOOK_SECRET")},
+})
+```
+
+To read the source from a file next to `railway.go`, use `os.ReadFile` (or
+`embed`) and pass the string. `runtime` picks the image from
+`railway.FunctionImages` and defaults to `"bun"`. To pin another image version
+pass `source` instead:
+
+```go
+railway.Fn("hook", railway.ServiceConfig{
+  "code":   code,
+  "source": railway.Image("ghcr.io/railwayapp/function-bun:1.2.16"),
+})
+```
+
+The source is limited to 96 KB (`railway.FunctionSourceMaxBytes`): the whole
+payload is one argument of the start command. `Fn` panics past that, with the
+same error Railway returns on apply. `code` and `start` are mutually exclusive —
+`railway.FunctionStartCommand(code)` builds the start command on its own.
+
 ## Multi-repo projects
 
 A named partial lets each repository manage its own slice of a Railway

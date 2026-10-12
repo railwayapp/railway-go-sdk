@@ -10,7 +10,10 @@ package railway
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -135,10 +138,93 @@ func Empty(options ...map[string]any) map[string]any {
 	return prune(out)
 }
 
+// FunctionImagePrefix is the registry prefix shared by every Railway Function
+// runtime image. Railway recognises a service as a function by it.
+const FunctionImagePrefix = "ghcr.io/railwayapp/function-"
+
+// FunctionImages maps a runtime name to the image Fn deploys for it. The
+// default runtime is "bun".
+var FunctionImages = map[string]string{
+	"bun": FunctionImagePrefix + "bun:1.4.0",
+}
+
+// FunctionSourceMaxBytes is the ceiling on a function's source. The whole
+// base64 payload is one argv entry of the container's start command, so the
+// kernel's 128 KiB per-argument limit caps the decoded source at 96 KB. Railway
+// rejects larger functions on apply; Fn and FunctionStartCommand panic first.
+const FunctionSourceMaxBytes = 96 * 1024
+
+// Fn declares a Railway Function: a single-file service that runs on a
+// function runtime image with no repository or build step. It accepts every
+// ServiceNamed config key plus two of its own:
+//
+//   - "code": the function's complete source as one file. Fn encodes it into
+//     the deploy start command (see FunctionStartCommand), so "code" and
+//     "start" are mutually exclusive.
+//   - "runtime": a key of FunctionImages, "bun" by default. Fn sets the source
+//     to that runtime's image. To pin another image version, pass "source"
+//     with Image("ghcr.io/railwayapp/function-bun:1.2.16") instead of "runtime".
+//
+// Fn panics on code over FunctionSourceMaxBytes, an unknown runtime, or
+// "runtime" combined with an explicit "source".
 func Fn(name string, config ServiceConfig) Service {
-	svc := ServiceNamed(name, config)
+	input := asMap(config)
+	if input == nil {
+		input = map[string]any{}
+	}
+	code, hasCode := input["code"]
+	runtime, hasRuntime := input["runtime"]
+	delete(input, "code")
+	delete(input, "runtime")
+	if hasCode {
+		text, ok := code.(string)
+		if !ok || text == "" {
+			panic("Function code must be a non-empty string.")
+		}
+		if firstNonNil(input["start"], input["startCommand"]) != nil {
+			panic("Function code and a start command are mutually exclusive: the code is the start command.")
+		}
+		input["start"] = FunctionStartCommand(text)
+	}
+	if hasRuntime && input["source"] != nil {
+		panic("Function runtime and an explicit source are mutually exclusive: pass the runtime image as the source instead.")
+	}
+	if (hasCode || hasRuntime) && input["source"] == nil {
+		input["source"] = Image(functionImage(runtime))
+	}
+	svc := ServiceNamed(name, ServiceConfig(input))
+	svc.Config = config
 	svc.node["kind"] = "function"
 	return svc
+}
+
+// FunctionStartCommand is the deploy start command that carries a function's
+// source: "./run.sh <base64 code>". The runtime image's run.sh decodes the
+// argument, writes it to index.tsx and runs it. Fn calls this for the "code"
+// key; use it directly to build a function service by hand. It panics when
+// the code is over FunctionSourceMaxBytes, with the error Railway returns.
+func FunctionStartCommand(code string) string {
+	if len(code) > FunctionSourceMaxBytes {
+		panic(fmt.Sprintf("Function source code is %d KB; the limit is %d KB", (len(code)+1023)/1024, FunctionSourceMaxBytes/1024))
+	}
+	return "./run.sh " + base64.StdEncoding.EncodeToString([]byte(code))
+}
+
+func functionImage(runtime any) string {
+	if runtime == nil {
+		runtime = "bun"
+	}
+	if name, ok := runtime.(string); ok {
+		if image, found := FunctionImages[name]; found {
+			return image
+		}
+	}
+	known := make([]string, 0, len(FunctionImages))
+	for key := range FunctionImages {
+		known = append(known, key)
+	}
+	sort.Strings(known)
+	panic(fmt.Sprintf("Unknown function runtime %q; supported runtimes: %s.", fmt.Sprint(runtime), strings.Join(known, ", ")))
 }
 
 func Postgres(name string, options ...map[string]any) Resource {

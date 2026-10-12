@@ -14,3 +14,12 @@ func ExampleProjectNamed() {
 	fmt.Println(graph["name"])
 	// Output: demo
 }
+
+func ExampleFn() {
+	hook := railway.Fn("hook", railway.ServiceConfig{
+		"code": `export default { fetch: () => new Response("ok") };`,
+	})
+	graph := hook.Graph()
+	fmt.Println(graph["kind"], graph["source"].(map[string]any)["image"])
+	// Output: function ghcr.io/railwayapp/function-bun:1.4.0
+}
