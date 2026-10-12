@@ -27,3 +27,14 @@ func ExampleAutoUpdates() {
 	fmt.Println(string(out))
 	// Output: {"schedule":[{"day":6,"endHour":6,"startHour":2}],"type":"patch"}
 }
+
+func ExampleFn() {
+	// Relative to this file: testdata/hook.ts next to example_test.go.
+	hook := railway.Fn("hook", railway.ServiceConfig{
+		"codeFile": "testdata/hook.ts",
+	})
+	graph := hook.Graph()
+	source := graph["source"].(map[string]any)
+	fmt.Println(graph["kind"], source["image"] == railway.FunctionImages["bun"])
+	// Output: function true
+}

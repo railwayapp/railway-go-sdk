@@ -10,7 +10,13 @@ package railway
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -352,10 +358,133 @@ func Empty(options ...map[string]any) map[string]any {
 	return prune(out)
 }
 
+// FunctionImagePrefix is the registry prefix shared by every Railway Function
+// runtime image. Railway recognises a service as a function by it.
+const FunctionImagePrefix = "ghcr.io/railwayapp/function-"
+
+// FunctionImages maps a runtime name to the image Fn deploys for it. The
+// default runtime is "bun".
+var FunctionImages = map[string]string{
+	"bun": FunctionImagePrefix + "bun:1.4.0",
+}
+
+// functionStartCommandPrefix is what run.sh in the function image expects in
+// front of the base64 source.
+const functionStartCommandPrefix = "./run.sh "
+
+// FunctionSourceMaxBytes is the ceiling on a function's source, in UTF-8 bytes:
+// 98295, just under 96 KB. The whole base64 payload is one argv entry of the
+// container's start command, the kernel caps a single argument at 128 KiB, and
+// the base64 has to fit after the "./run.sh " prefix. Railway derives the same
+// limit and rejects larger functions on apply; Fn and FunctionStartCommand
+// panic first.
+const FunctionSourceMaxBytes = (128*1024 - 1 - len(functionStartCommandPrefix)) / 4 * 3
+
+// Fn declares a Railway Function: a single-file service that runs on a
+// function runtime image with no repository or build step. It accepts every
+// ServiceNamed config key plus two of its own:
+//
+//   - "codeFile": path of the function's source file. A relative path is
+//     resolved against the directory of the Go file that calls Fn (the config
+//     file, so "hook.ts" is the file next to railway.go; a helper in another
+//     file resolves against that helper, and a -trimpath build falls back to
+//     the working directory, which the CLI sets to the config directory). Fn
+//     reads the file when the config is evaluated and encodes it into the
+//     deploy start command (see FunctionStartCommand), so "codeFile" and any
+//     start command ("start", "startCommand", "run.command" or
+//     "deploy.startCommand") are mutually exclusive.
+//   - "runtime": a key of FunctionImages, "bun" by default. Fn sets the source
+//     to that runtime's image. To pin another image version, pass "source"
+//     with Image("ghcr.io/railwayapp/function-bun:1.2.16") instead of "runtime".
+//
+// Fn panics when the file is missing, empty or over FunctionSourceMaxBytes,
+// on an unknown runtime, or on "runtime" combined with an explicit "source".
 func Fn(name string, config ServiceConfig) Service {
-	svc := ServiceNamed(name, config)
+	input := asMap(config)
+	if input == nil {
+		input = map[string]any{}
+	}
+	codeFile, hasCodeFile := input["codeFile"]
+	runtimeName, hasRuntime := input["runtime"]
+	delete(input, "codeFile")
+	delete(input, "runtime")
+	if hasCodeFile {
+		path, ok := codeFile.(string)
+		if !ok || path == "" {
+			panic("Function codeFile must be a non-empty path.")
+		}
+		if firstNonNil(input["start"], input["startCommand"], asMap(input["run"])["command"], asMap(input["deploy"])["startCommand"]) != nil {
+			panic("Function codeFile and a start command are mutually exclusive: the code is the start command.")
+		}
+		input["start"] = FunctionStartCommand(readFunctionCode(resolveCallerPath(path)))
+	}
+	if hasRuntime && input["source"] != nil {
+		panic("Function runtime and an explicit source are mutually exclusive: pass the runtime image as the source instead.")
+	}
+	if (hasCodeFile || hasRuntime) && input["source"] == nil {
+		input["source"] = Image(functionImage(runtimeName))
+	}
+	svc := ServiceNamed(name, ServiceConfig(input))
+	svc.Config = config
 	svc.node["kind"] = "function"
 	return svc
+}
+
+// FunctionStartCommand is the deploy start command that carries a function's
+// source: "./run.sh <base64 code>". The runtime image's run.sh decodes the
+// argument, writes it to index.tsx and runs it. Fn calls this with the
+// contents of "codeFile"; use it directly to build a function service by hand.
+// It panics when the code is over FunctionSourceMaxBytes, with the error
+// Railway returns.
+func FunctionStartCommand(code string) string {
+	if len(code) > FunctionSourceMaxBytes {
+		panic(fmt.Sprintf("Function source code is %d bytes; the limit is %d bytes", len(code), FunctionSourceMaxBytes))
+	}
+	return functionStartCommandPrefix + base64.StdEncoding.EncodeToString([]byte(code))
+}
+
+func readFunctionCode(path string) string {
+	code, err := os.ReadFile(path)
+	if err != nil {
+		panic(fmt.Sprintf("Function codeFile %s: %v", path, err))
+	}
+	if len(code) == 0 {
+		panic(fmt.Sprintf("Function codeFile %s is empty.", path))
+	}
+	return string(code)
+}
+
+// resolveCallerPath makes a relative path absolute against the directory of
+// the user's Go file that called into this package: the config file under
+// `go run`, which records absolute source paths. Without one (trimpath, or a
+// caller that cannot be determined) the path is left for the OS to resolve
+// against the working directory, which the CLI sets to the config directory.
+func resolveCallerPath(path string) string {
+	if filepath.IsAbs(path) {
+		return path
+	}
+	// Frame 0 is this function, 1 is Fn, 2 is the user's call site.
+	if _, file, _, ok := runtime.Caller(2); ok && filepath.IsAbs(file) {
+		return filepath.Join(filepath.Dir(file), path)
+	}
+	return path
+}
+
+func functionImage(requested any) string {
+	if requested == nil {
+		requested = "bun"
+	}
+	if name, ok := requested.(string); ok {
+		if image, found := FunctionImages[name]; found {
+			return image
+		}
+	}
+	known := make([]string, 0, len(FunctionImages))
+	for key := range FunctionImages {
+		known = append(known, key)
+	}
+	sort.Strings(known)
+	panic(fmt.Sprintf("Unknown function runtime %q; supported runtimes: %s.", fmt.Sprint(requested), strings.Join(known, ", ")))
 }
 
 func Postgres(name string, options ...map[string]any) Resource {

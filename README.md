@@ -74,6 +74,41 @@ other registries and `railway.Github` never accepts it. The raw
 `map[string]any` form that `railway config pull` writes out is still accepted
 and validated the same way.
 
+## Functions
+
+A Railway Function is a single file of TypeScript that runs on the Bun runtime
+image with no repository or build step. `railway.Fn` takes the path of that
+file under `codeFile`, reads it when the config is evaluated, and compiles it
+into the function image plus a base64-encoded start command, the same shape
+the dashboard and `railway functions push` produce:
+
+```go
+// .railway/railway.go, with the source in .railway/hook.ts
+hook := railway.Fn("hook", railway.ServiceConfig{
+  "codeFile": "hook.ts",
+  "env":      map[string]any{"SECRET": railway.Shared("WEBHOOK_SECRET")},
+})
+```
+
+A relative `codeFile` is resolved against the directory of the Go file that
+calls `Fn`, so paths are relative to `railway.go` no matter where `railway
+config plan` runs. `runtime` picks the image from `railway.FunctionImages` and
+defaults to `"bun"`. To pin another image version pass `source` instead:
+
+```go
+railway.Fn("hook", railway.ServiceConfig{
+  "codeFile": "hook.ts",
+  "source":   railway.Image("ghcr.io/railwayapp/function-bun:1.2.16"),
+})
+```
+
+The source is limited to 98,295 bytes of UTF-8 (`railway.FunctionSourceMaxBytes`,
+just under 96 KB): the whole payload is one argument of the start command, the
+kernel caps a single argument at 128 KiB, and the base64 has to fit after the
+`./run.sh ` prefix. `Fn` panics past that, with the same error Railway returns
+on apply. `codeFile` and `start` are mutually exclusive — `railway.FunctionStartCommand(code)`
+builds the start command from a string on its own.
+
 ## Multi-repo projects
 
 A named partial lets each repository manage its own slice of a Railway
