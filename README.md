@@ -41,6 +41,39 @@ require github.com/railwayapp/railway-go-sdk v0.2.0
 
 Config as Code migration: `railway config migrate --lang go`.
 
+## Image auto updates
+
+Docker Hub and GHCR image sources can follow new image tags automatically.
+Pass a `railway.AutoUpdates` value as the `autoUpdates` option of
+`railway.Image`: `Type` is the policy (`railway.AutoUpdatesPatch`,
+`railway.AutoUpdatesMinor` or `railway.AutoUpdatesDisabled`) and `Schedule`
+the weekly UTC maintenance windows updates may run in. Each
+`railway.AutoUpdateWindow` has a `Day` (0 Sunday through 6 Saturday), a
+`StartHour` (0 to 23, inclusive) and an `EndHour` (1 to 24, exclusive, after
+`StartHour`). The windows are validated when the file is evaluated, so a bad
+day or hour fails `railway config plan` instead of the apply.
+
+```go
+nginx := railway.ServiceNamed("nginx", railway.ServiceConfig{
+  "source": railway.Image("nginx:latest", map[string]any{
+    "autoUpdates": railway.AutoUpdates{
+      Type: railway.AutoUpdatesPatch,
+      // Saturdays 02:00 to 06:00 UTC and Sundays 02:00 to 06:00 UTC.
+      Schedule: []railway.AutoUpdateWindow{
+        {Day: 6, StartHour: 2, EndHour: 6},
+        {Day: 0, StartHour: 2, EndHour: 6},
+      },
+    },
+  }),
+})
+```
+
+`autoUpdates` only applies to Docker Hub and GHCR images (`nginx:latest`,
+`docker.io/library/nginx`, `ghcr.io/acme/api`); `railway.Image` panics for
+other registries and `railway.Github` never accepts it. The raw
+`map[string]any` form that `railway config pull` writes out is still accepted
+and validated the same way.
+
 ## Multi-repo projects
 
 A named partial lets each repository manage its own slice of a Railway

@@ -1,6 +1,7 @@
 package railway_test
 
 import (
+	"encoding/json"
 	"fmt"
 
 	railway "github.com/railwayapp/railway-go-sdk"
@@ -13,4 +14,16 @@ func ExampleProjectNamed() {
 	graph := railway.ProjectNamed("demo", []any{web}).Graph()
 	fmt.Println(graph["name"])
 	// Output: demo
+}
+
+func ExampleAutoUpdates() {
+	source := railway.Image("nginx:latest", map[string]any{
+		"autoUpdates": railway.AutoUpdates{
+			Type:     railway.AutoUpdatesPatch,
+			Schedule: []railway.AutoUpdateWindow{{Day: 6, StartHour: 2, EndHour: 6}},
+		},
+	})
+	out, _ := json.Marshal(source["autoUpdates"])
+	fmt.Println(string(out))
+	// Output: {"schedule":[{"day":6,"endHour":6,"startHour":2}],"type":"patch"}
 }
