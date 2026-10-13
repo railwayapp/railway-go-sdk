@@ -1,7 +1,12 @@
 package railway
 
 import (
+	"encoding/base64"
+	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -324,4 +329,146 @@ func TestServiceCdn(t *testing.T) {
 	expectPanic("bad shape", func() {
 		ServiceNamed("web", ServiceConfig{"cdn": true})
 	})
+}
+
+func TestFnCodeFile(t *testing.T) {
+	code, err := os.ReadFile("testdata/hook.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A relative codeFile resolves against this file's directory, not the
+	// working directory: move away and the lookup must still succeed.
+	wd, _ := os.Getwd()
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(wd)
+
+	worker := Fn("worker", ServiceConfig{
+		"codeFile": "testdata/hook.ts",
+		"env":      map[string]any{"NAME": "worker"},
+	})
+	node := worker.Graph()
+	if node["kind"] != "function" {
+		t.Fatalf("kind: %v", node["kind"])
+	}
+	source, _ := node["source"].(map[string]any)
+	if source["type"] != "image" || source["image"] != FunctionImages["bun"] {
+		t.Fatalf("source: %v", source)
+	}
+	deploy, _ := node["deploy"].(map[string]any)
+	start, _ := deploy["startCommand"].(string)
+	if !strings.HasPrefix(start, "./run.sh ") {
+		t.Fatalf("startCommand: %q", start)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(start, "./run.sh "))
+	if err != nil || string(decoded) != string(code) {
+		t.Fatalf("decoded: %q %v", decoded, err)
+	}
+	for _, key := range []string{"codeFile", "runtime"} {
+		if _, ok := node[key]; ok {
+			t.Fatalf("%s leaked into the graph: %v", key, node)
+		}
+	}
+	// The caller's config is neither mutated nor replaced.
+	if worker.Config["codeFile"] != "testdata/hook.ts" {
+		t.Fatalf("config: %v", worker.Config)
+	}
+	variables := node["variables"].(map[string]any)
+	if variables["NAME"].(map[string]any)["value"] != "worker" {
+		t.Fatalf("variables: %v", variables)
+	}
+
+	// An absolute path is used as is.
+	absolute := filepath.Join(t.TempDir(), "abs.ts")
+	if err := os.WriteFile(absolute, []byte("export {}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if Fn("abs", ServiceConfig{"codeFile": absolute}).Graph()["deploy"].(map[string]any)["startCommand"] != FunctionStartCommand("export {}") {
+		t.Fatalf("absolute codeFile")
+	}
+
+	// Explicit runtime, and an explicit source to pin another image version.
+	explicit := Fn("explicit", ServiceConfig{"codeFile": "testdata/hook.ts", "runtime": "bun"}).Graph()
+	if explicit["source"].(map[string]any)["image"] != FunctionImages["bun"] {
+		t.Fatalf("explicit runtime: %v", explicit["source"])
+	}
+	pinned := Fn("pinned", ServiceConfig{
+		"codeFile": "testdata/hook.ts",
+		"source":   Image("ghcr.io/railwayapp/function-bun:1.2.16"),
+	}).Graph()
+	if pinned["source"].(map[string]any)["image"] != "ghcr.io/railwayapp/function-bun:1.2.16" {
+		t.Fatalf("pinned source: %v", pinned["source"])
+	}
+
+	// No codeFile and no runtime is the old behaviour: a function node with
+	// whatever the caller declared, and no synthesised source.
+	plain := Fn("plain", ServiceConfig{"start": "./run.sh abc"}).Graph()
+	if _, ok := plain["source"]; ok || plain["kind"] != "function" {
+		t.Fatalf("plain: %v", plain)
+	}
+}
+
+func TestFnCodeLimit(t *testing.T) {
+	// The kernel caps one argv entry at 128 KiB; after the "./run.sh " prefix
+	// the base64 has room for 98295 source bytes. Railway derives the same.
+	if FunctionSourceMaxBytes != 98295 {
+		t.Fatalf("limit: %d", FunctionSourceMaxBytes)
+	}
+	atLimit := strings.Repeat("a", FunctionSourceMaxBytes)
+	command := FunctionStartCommand(atLimit)
+	if !strings.HasPrefix(command, "./run.sh ") || len(command) > 128*1024-1 {
+		t.Fatalf("at limit: %d bytes", len(command))
+	}
+	msg := mustPanic(t, func() { FunctionStartCommand(atLimit + "a") })
+	if msg != "Function source code is 98296 bytes; the limit is 98295 bytes" {
+		t.Fatalf("limit message: %q", msg)
+	}
+	// Through a file, and in bytes, not runes: a multi-byte character counts
+	// its UTF-8 width.
+	big := filepath.Join(t.TempDir(), "big.ts")
+	if err := os.WriteFile(big, []byte(strings.Repeat("é", FunctionSourceMaxBytes/2+1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if msg := mustPanic(t, func() { Fn("big", ServiceConfig{"codeFile": big}) }); msg != "Function source code is 98296 bytes; the limit is 98295 bytes" {
+		t.Fatalf("file limit message: %q", msg)
+	}
+}
+
+func TestFnPanics(t *testing.T) {
+	mustPanic(t, func() { Fn("f", ServiceConfig{"codeFile": ""}) })
+	mustPanic(t, func() { Fn("f", ServiceConfig{"codeFile": 42}) })
+	mustPanic(t, func() { Fn("f", ServiceConfig{"codeFile": "testdata/hook.ts", "start": "./app"}) })
+	mustPanic(t, func() { Fn("f", ServiceConfig{"codeFile": "testdata/hook.ts", "startCommand": "./app"}) })
+	mustPanic(t, func() { Fn("f", ServiceConfig{"codeFile": "testdata/hook.ts", "run": map[string]any{"command": "./app"}}) })
+	mustPanic(t, func() { Fn("f", ServiceConfig{"codeFile": "testdata/hook.ts", "deploy": map[string]any{"startCommand": "./app"}}) })
+	mustPanic(t, func() { Fn("f", ServiceConfig{"runtime": "bun", "source": Image("nginx")}) })
+	msg := mustPanic(t, func() { Fn("f", ServiceConfig{"codeFile": "testdata/hook.ts", "runtime": "deno"}) })
+	if msg != `Unknown function runtime "deno"; supported runtimes: bun.` {
+		t.Fatalf("runtime message: %q", msg)
+	}
+	msg = mustPanic(t, func() { Fn("f", ServiceConfig{"codeFile": "testdata/missing.ts"}) })
+	if !strings.HasPrefix(msg, "Function codeFile ") || !strings.Contains(msg, "testdata/missing.ts") {
+		t.Fatalf("missing file message: %q", msg)
+	}
+	empty := filepath.Join(t.TempDir(), "empty.ts")
+	if err := os.WriteFile(empty, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if msg := mustPanic(t, func() { Fn("f", ServiceConfig{"codeFile": empty}) }); !strings.HasSuffix(msg, "is empty.") {
+		t.Fatalf("empty file message: %q", msg)
+	}
+}
+
+func mustPanic(t *testing.T, fn func()) (message string) {
+	t.Helper()
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			t.Fatalf("expected a panic")
+		}
+		message = fmt.Sprint(recovered)
+	}()
+	fn()
+	return ""
 }
