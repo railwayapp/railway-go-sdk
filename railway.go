@@ -390,7 +390,8 @@ type ServiceCdn struct {
 	// Authentication.
 	Enabled bool
 	// DefaultTtlSeconds is how long the edge keeps a cacheable response without
-	// Cache-Control headers of its own, in seconds. Defaults to 7200.
+	// Cache-Control headers of its own, in seconds. Defaults to 7200; zero
+	// leaves the default (the edge accepts 30 minutes to a day).
 	DefaultTtlSeconds int
 	// HtmlCaching says whether HTML documents are cached. Defaults to auto.
 	HtmlCaching ServiceCdnHtmlCaching
@@ -463,7 +464,7 @@ func normalizeServiceCdn(value any) map[string]any {
 		case ServiceCdnHtmlCachingAuto, ServiceCdnHtmlCachingForce, ServiceCdnHtmlCachingNever:
 			out["htmlCaching"] = mode
 		default:
-			panic("Service cdn.htmlCaching must be \"auto\", \"force\" or \"never\".")
+			panic("Service cdn.htmlCaching must be \"auto\", \"force\" or \"never\", got " + strconv.Quote(mode) + ".")
 		}
 	}
 	if raw, ok := out["purgeOnDeploy"]; ok && raw != nil {
@@ -478,7 +479,7 @@ func normalizeServiceCdn(value any) map[string]any {
 		case ServiceCdnPurgeOnDeployOff, ServiceCdnPurgeOnDeployHtml, ServiceCdnPurgeOnDeployAll:
 			out["purgeOnDeploy"] = mode
 		default:
-			panic("Service cdn.purgeOnDeploy must be \"off\", \"html\" or \"all\".")
+			panic("Service cdn.purgeOnDeploy must be \"off\", \"html\" or \"all\", got " + strconv.Quote(mode) + ".")
 		}
 	}
 	return prune(out)

@@ -241,7 +241,7 @@ func TestServiceCdn(t *testing.T) {
 		return cdn
 	}
 
-	// The CLI compiles `cdn` into `services[id].cdn` and backboard serialises
+	// The CLI compiles `cdn` into `services[id].cdn` and Railway serialises
 	// only the knobs that differ from the defaults, so the SDK passes the block
 	// through rather than filling defaults in.
 	swr := false
