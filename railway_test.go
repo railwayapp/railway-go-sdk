@@ -225,6 +225,112 @@ func TestImageAutoUpdates(t *testing.T) {
 	})
 }
 
+func TestServiceCdn(t *testing.T) {
+	expectPanic := func(name string, fn func()) {
+		t.Helper()
+		defer func() {
+			if recover() == nil {
+				t.Fatalf("%s: expected panic", name)
+			}
+		}()
+		fn()
+	}
+	cdnOf := func(svc Service) map[string]any {
+		t.Helper()
+		cdn, _ := svc.Graph()["cdn"].(map[string]any)
+		return cdn
+	}
+
+	// The CLI compiles `cdn` into `services[id].cdn` and Railway serialises
+	// only the knobs that differ from the defaults, so the SDK passes the block
+	// through rather than filling defaults in.
+	swr := false
+	typed := ServiceNamed("docs", ServiceConfig{"cdn": ServiceCdn{
+		Enabled:              true,
+		DefaultTtlSeconds:    86400,
+		HtmlCaching:          ServiceCdnHtmlCachingForce,
+		StaleWhileRevalidate: &swr,
+		PurgeOnDeploy:        ServiceCdnPurgeOnDeployAll,
+	}})
+	want := map[string]any{
+		"enabled":              true,
+		"defaultTtlSeconds":    86400,
+		"htmlCaching":          "force",
+		"staleWhileRevalidate": false,
+		"purgeOnDeploy":        "all",
+	}
+	if got := cdnOf(typed); !reflect.DeepEqual(got, want) {
+		t.Fatalf("typed cdn: %v", got)
+	}
+
+	// The raw map form `railway config pull` writes is normalised to the same graph.
+	raw := ServiceNamed("docs", ServiceConfig{"cdn": map[string]any{
+		"enabled":              true,
+		"defaultTtlSeconds":    86400.0, // JSON-decoded numbers are floats.
+		"htmlCaching":          "force",
+		"staleWhileRevalidate": false,
+		"purgeOnDeploy":        "all",
+	}})
+	if got := cdnOf(raw); !reflect.DeepEqual(got, want) {
+		t.Fatalf("raw cdn: %v", got)
+	}
+
+	// {enabled: true} is a service caching with the defaults; nothing is filled in.
+	enabled := ServiceNamed("web", ServiceConfig{"cdn": ServiceCdn{Enabled: true}})
+	if got := cdnOf(enabled); !reflect.DeepEqual(got, map[string]any{"enabled": true}) {
+		t.Fatalf("enabled only: %v", got)
+	}
+	disabled := ServiceNamed("web", ServiceConfig{"cdn": map[string]any{"enabled": false}})
+	if got := cdnOf(disabled); !reflect.DeepEqual(got, map[string]any{"enabled": false}) {
+		t.Fatalf("disabled: %v", got)
+	}
+	worker := Fn("worker", ServiceConfig{"cdn": ServiceCdn{Enabled: true}})
+	if worker.Graph()["kind"] != "function" || cdnOf(worker)["enabled"] != true {
+		t.Fatalf("function cdn: %v", worker.Graph())
+	}
+
+	// Unknown raw keys pass through so a newer `railway config pull` still evaluates.
+	future := ServiceNamed("web", ServiceConfig{"cdn": map[string]any{"enabled": true, "compression": "br"}})
+	if got := cdnOf(future); got["compression"] != "br" {
+		t.Fatalf("unknown key: %v", got)
+	}
+
+	// No knobs is no block; nil knobs are dropped.
+	for name, cfg := range map[string]ServiceConfig{
+		"absent":  {},
+		"nil":     {"cdn": nil},
+		"nil ptr": {"cdn": (*ServiceCdn)(nil)},
+		"empty":   {"cdn": map[string]any{}},
+		"nils":    {"cdn": map[string]any{"enabled": nil, "htmlCaching": nil}},
+	} {
+		if _, ok := ServiceNamed("web", cfg).Graph()["cdn"]; ok {
+			t.Fatalf("%s: cdn should be dropped", name)
+		}
+	}
+	if _, ok := Postgres("db").Graph()["cdn"]; ok {
+		t.Fatalf("database carries cdn")
+	}
+
+	expectPanic("bad htmlCaching", func() {
+		ServiceNamed("web", ServiceConfig{"cdn": ServiceCdn{Enabled: true, HtmlCaching: "always"}})
+	})
+	expectPanic("raw bad purgeOnDeploy", func() {
+		ServiceNamed("web", ServiceConfig{"cdn": map[string]any{"purgeOnDeploy": "none"}})
+	})
+	expectPanic("negative ttl", func() {
+		ServiceNamed("web", ServiceConfig{"cdn": ServiceCdn{Enabled: true, DefaultTtlSeconds: -1}})
+	})
+	expectPanic("fractional ttl", func() {
+		ServiceNamed("web", ServiceConfig{"cdn": map[string]any{"defaultTtlSeconds": 1.5}})
+	})
+	expectPanic("string enabled", func() {
+		ServiceNamed("web", ServiceConfig{"cdn": map[string]any{"enabled": "yes"}})
+	})
+	expectPanic("bad shape", func() {
+		ServiceNamed("web", ServiceConfig{"cdn": true})
+	})
+}
+
 func TestFnCodeFile(t *testing.T) {
 	code, err := os.ReadFile("testdata/hook.ts")
 	if err != nil {

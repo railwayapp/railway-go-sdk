@@ -342,6 +342,149 @@ func asInt(value any) (int, bool) {
 	return 0, false
 }
 
+// ServiceCdnHtmlCaching says whether the edge caches HTML documents.
+type ServiceCdnHtmlCaching string
+
+const (
+	// ServiceCdnHtmlCachingAuto follows the response headers.
+	ServiceCdnHtmlCachingAuto ServiceCdnHtmlCaching = "auto"
+	// ServiceCdnHtmlCachingForce caches HTML documents regardless of headers.
+	ServiceCdnHtmlCachingForce ServiceCdnHtmlCaching = "force"
+	// ServiceCdnHtmlCachingNever leaves HTML documents uncached.
+	ServiceCdnHtmlCachingNever ServiceCdnHtmlCaching = "never"
+)
+
+// ServiceCdnPurgeOnDeploy says what a successful deploy purges from the cache.
+type ServiceCdnPurgeOnDeploy string
+
+const (
+	// ServiceCdnPurgeOnDeployOff purges nothing.
+	ServiceCdnPurgeOnDeployOff ServiceCdnPurgeOnDeploy = "off"
+	// ServiceCdnPurgeOnDeployHtml purges HTML documents and keeps immutable
+	// assets warm.
+	ServiceCdnPurgeOnDeployHtml ServiceCdnPurgeOnDeploy = "html"
+	// ServiceCdnPurgeOnDeployAll clears everything.
+	ServiceCdnPurgeOnDeployAll ServiceCdnPurgeOnDeploy = "all"
+)
+
+// ServiceCdn configures CDN caching for the service's public domains in this
+// environment. Settings live on the edge and apply without a deploy. Pass it
+// as the "cdn" option of ServiceNamed or Fn:
+//
+//	railway.ServiceNamed("docs", railway.ServiceConfig{
+//		"cdn": railway.ServiceCdn{
+//			Enabled:           true,
+//			DefaultTtlSeconds: 86400,
+//			HtmlCaching:       railway.ServiceCdnHtmlCachingForce,
+//		},
+//	})
+//
+// Mirrors services[id].cdn in the environment config. Railway serialises the
+// block only while caching is on, and only the knobs that differ from the
+// defaults, so an omitted block, {Enabled: false} and nil all mean off and
+// {Enabled: true} is a service caching with the defaults. The SDK does not
+// fill defaults in: zero values other than Enabled are omitted from the graph.
+type ServiceCdn struct {
+	// Enabled caches responses from the service's public domains at Railway's
+	// edge. Needs a public domain; cannot be combined with Railway
+	// Authentication.
+	Enabled bool
+	// DefaultTtlSeconds is how long the edge keeps a cacheable response without
+	// Cache-Control headers of its own, in seconds. Defaults to 7200; zero
+	// leaves the default (the edge accepts 30 minutes to a day).
+	DefaultTtlSeconds int
+	// HtmlCaching says whether HTML documents are cached. Defaults to auto.
+	HtmlCaching ServiceCdnHtmlCaching
+	// StaleWhileRevalidate honours stale-while-revalidate Cache-Control
+	// directives, serving a stale copy while the edge refreshes it. Defaults
+	// to true; nil leaves the default.
+	StaleWhileRevalidate *bool
+	// PurgeOnDeploy says what a successful deploy purges from the cache.
+	// Defaults to html.
+	PurgeOnDeploy ServiceCdnPurgeOnDeploy
+}
+
+// normalizeServiceCdn turns the "cdn" option of a service into the graph
+// shape, accepting the typed ServiceCdn struct or the raw map form, and
+// validates the knobs either way. Unknown keys in a raw map pass through so a
+// newer `railway config pull` still evaluates.
+func normalizeServiceCdn(value any) map[string]any {
+	var out map[string]any
+	switch v := value.(type) {
+	case nil:
+		return nil
+	case ServiceCdn:
+		out = map[string]any{"enabled": v.Enabled}
+		if v.DefaultTtlSeconds != 0 {
+			out["defaultTtlSeconds"] = v.DefaultTtlSeconds
+		}
+		if v.HtmlCaching != "" {
+			out["htmlCaching"] = v.HtmlCaching
+		}
+		if v.StaleWhileRevalidate != nil {
+			out["staleWhileRevalidate"] = *v.StaleWhileRevalidate
+		}
+		if v.PurgeOnDeploy != "" {
+			out["purgeOnDeploy"] = v.PurgeOnDeploy
+		}
+	case *ServiceCdn:
+		if v == nil {
+			return nil
+		}
+		return normalizeServiceCdn(*v)
+	case map[string]any:
+		out = cloneMap(v)
+	default:
+		panic("Service cdn must be a railway.ServiceCdn value or a map[string]any.")
+	}
+
+	for _, key := range []string{"enabled", "staleWhileRevalidate"} {
+		if raw, ok := out[key]; ok && raw != nil {
+			if _, isBool := raw.(bool); !isBool {
+				panic("Service cdn." + key + " must be a bool.")
+			}
+		}
+	}
+	if raw, ok := out["defaultTtlSeconds"]; ok && raw != nil {
+		ttl, isInt := asInt(raw)
+		if !isInt || ttl < 0 {
+			panic("Service cdn.defaultTtlSeconds must be a non-negative integer.")
+		}
+		out["defaultTtlSeconds"] = ttl
+	}
+	if raw, ok := out["htmlCaching"]; ok && raw != nil {
+		var mode string
+		switch m := raw.(type) {
+		case ServiceCdnHtmlCaching:
+			mode = string(m)
+		case string:
+			mode = m
+		}
+		switch ServiceCdnHtmlCaching(mode) {
+		case ServiceCdnHtmlCachingAuto, ServiceCdnHtmlCachingForce, ServiceCdnHtmlCachingNever:
+			out["htmlCaching"] = mode
+		default:
+			panic("Service cdn.htmlCaching must be \"auto\", \"force\" or \"never\", got " + strconv.Quote(mode) + ".")
+		}
+	}
+	if raw, ok := out["purgeOnDeploy"]; ok && raw != nil {
+		var mode string
+		switch m := raw.(type) {
+		case ServiceCdnPurgeOnDeploy:
+			mode = string(m)
+		case string:
+			mode = m
+		}
+		switch ServiceCdnPurgeOnDeploy(mode) {
+		case ServiceCdnPurgeOnDeployOff, ServiceCdnPurgeOnDeployHtml, ServiceCdnPurgeOnDeployAll:
+			out["purgeOnDeploy"] = mode
+		default:
+			panic("Service cdn.purgeOnDeploy must be \"off\", \"html\" or \"all\", got " + strconv.Quote(mode) + ".")
+		}
+	}
+	return prune(out)
+}
+
 func Template(templateName string, options ...map[string]any) map[string]any {
 	out := map[string]any{"type": "template", "template": templateName}
 	for k, v := range firstMap(options) {
@@ -678,6 +821,11 @@ func serviceNode(name string, config ServiceConfig) map[string]any {
 	// Railway serialises an untraced service without a block, so no switches is no block.
 	if tracing := prune(asMap(config["tracing"])); tracing != nil {
 		node["tracing"] = tracing
+	}
+	// Per-environment CDN caching: see ServiceCdn. Railway serialises an
+	// uncached service without a block, so no knobs is no block.
+	if cdn := normalizeServiceCdn(config["cdn"]); cdn != nil {
+		node["cdn"] = cdn
 	}
 	return node
 }
