@@ -485,6 +485,378 @@ func normalizeServiceCdn(value any) map[string]any {
 	return prune(out)
 }
 
+// EdgeRuleAction is what the edge does when a rule's condition matches.
+type EdgeRuleAction string
+
+const (
+	// EdgeRuleActionBlock answers the request at the edge with an error.
+	EdgeRuleActionBlock EdgeRuleAction = "block"
+	// EdgeRuleActionAllow lets the request through to the service.
+	EdgeRuleActionAllow EdgeRuleAction = "allow"
+	// EdgeRuleActionChallenge makes the client pass a challenge first.
+	EdgeRuleActionChallenge EdgeRuleAction = "challenge"
+	// EdgeRuleActionRedirect answers the request with a redirect.
+	EdgeRuleActionRedirect EdgeRuleAction = "redirect"
+	// EdgeRuleActionCacheOverride overrides the CDN's caching for the request.
+	EdgeRuleActionCacheOverride EdgeRuleAction = "cache_override"
+)
+
+// EdgeRuleMode is how the edge applies a matching rule.
+type EdgeRuleMode string
+
+const (
+	// EdgeRuleModeEnforce applies the rule's action. The only mode today, and
+	// the default.
+	EdgeRuleModeEnforce EdgeRuleMode = "enforce"
+)
+
+// EdgeRuleExpr is a rule's condition: one clause over a request attribute
+// (Attr, Op, Value and, for http.header, Key), or exactly one of the And, Or
+// and Not combinators over other conditions. Attributes and operators come
+// from the edge's registry (ipv4.src, http.host, http.path and http.header,
+// with eq, neq, in, not_in, contains and matches); the edge validates them
+// when the change is committed.
+//
+//	railway.EdgeRuleExpr{And: []railway.EdgeRuleExpr{
+//		{Attr: "http.path", Op: "matches", Value: "/admin/*"},
+//		{Not: &railway.EdgeRuleExpr{Attr: "ipv4.src", Op: "in", Value: []string{"10.0.0.0/8"}}},
+//	}}
+type EdgeRuleExpr struct {
+	// And matches when every condition matches.
+	And []EdgeRuleExpr
+	// Or matches when any condition matches.
+	Or []EdgeRuleExpr
+	// Not matches when the condition does not.
+	Not *EdgeRuleExpr
+	// Attr is the request attribute: ipv4.src, http.host, http.path or
+	// http.header.
+	Attr string
+	// Op is the comparison: eq, neq, in, not_in, contains or matches (glob),
+	// as the attribute allows.
+	Op string
+	// Value is the string to compare with, or the []string for in and not_in.
+	Value any
+	// Key is the header name; required for http.header only.
+	Key string
+}
+
+// EdgeRuleThen is what the edge does when a rule's condition matches.
+type EdgeRuleThen struct {
+	Action EdgeRuleAction
+	// Params are the action's parameters: status and body for block; status
+	// and either location or host (plus preserve_path and preserve_query) for
+	// redirect; ttl_seconds or bypass for cache_override. The SDK passes them
+	// through; the edge validates them when the change is committed.
+	Params map[string]any
+}
+
+// EdgeRule is one edge rule. Rules carry no id: the edge assigns one, and a
+// staged change keeps a live rule's id when the priority matches. Enabled and
+// Mode are omitted at their defaults.
+type EdgeRule struct {
+	// Description is free text.
+	Description string
+	// Priority is the evaluation order, lowest first. Unique within the
+	// service.
+	Priority int
+	// Enabled false keeps the rule without evaluating it. Defaults to true;
+	// nil leaves the default.
+	Enabled *bool
+	// Mode defaults to enforce, the only mode today; empty leaves the default.
+	Mode EdgeRuleMode
+	If   EdgeRuleExpr
+	Then EdgeRuleThen
+}
+
+// EdgeRules is the service's edge rules in this environment, evaluated at the
+// edge before a request reaches the service. Pass it as the "edgeRules"
+// option of ServiceNamed or Fn:
+//
+//	railway.ServiceNamed("web", railway.ServiceConfig{
+//		"edgeRules": railway.EdgeRules{{
+//			Priority: 0,
+//			If:       railway.EdgeRuleExpr{Attr: "http.host", Op: "eq", Value: "old.example.com"},
+//			Then: railway.EdgeRuleThen{
+//				Action: railway.EdgeRuleActionRedirect,
+//				Params: map[string]any{"status": 301, "host": "example.com", "preserve_path": true},
+//			},
+//		}},
+//	})
+//
+// Mirrors services[id].edgeRules in the environment config. Railway
+// serialises the list sorted by priority and without default-valued fields,
+// so a reordered or default-laden copy does not plan as drift; the SDK does
+// not sort or strip defaults either. An omitted key, nil and an empty list
+// all mean no rules; the list is replaced as a whole and applies without a
+// deploy.
+type EdgeRules []EdgeRule
+
+// normalizeEdgeRules turns the "edgeRules" option of a service into the graph
+// shape, accepting the typed EdgeRules list or the raw list of maps that
+// `railway config pull` writes, and validates the shape of each rule either
+// way. Unknown keys in a raw map pass through so a newer `railway config pull`
+// still evaluates.
+func normalizeEdgeRules(value any) []any {
+	var items []any
+	switch v := value.(type) {
+	case nil:
+		return nil
+	case EdgeRules:
+		for _, rule := range v {
+			items = append(items, rule)
+		}
+	case []EdgeRule:
+		return normalizeEdgeRules(EdgeRules(v))
+	case *EdgeRules:
+		if v == nil {
+			return nil
+		}
+		return normalizeEdgeRules(*v)
+	case []any:
+		items = v
+	case []map[string]any:
+		for _, rule := range v {
+			items = append(items, rule)
+		}
+	default:
+		panic("Service edgeRules must be a railway.EdgeRules value or a list of map[string]any.")
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]any, 0, len(items))
+	for i, item := range items {
+		out = append(out, normalizeEdgeRule(item, "edgeRules["+strconv.Itoa(i)+"]"))
+	}
+	return out
+}
+
+func normalizeEdgeRule(value any, path string) map[string]any {
+	var out map[string]any
+	switch v := value.(type) {
+	case EdgeRule:
+		out = map[string]any{"priority": v.Priority, "if": v.If, "then": v.Then}
+		if v.Description != "" {
+			out["description"] = v.Description
+		}
+		if v.Enabled != nil {
+			out["enabled"] = *v.Enabled
+		}
+		if v.Mode != "" {
+			out["mode"] = v.Mode
+		}
+	case *EdgeRule:
+		if v == nil {
+			panic("Service " + path + " must not be nil.")
+		}
+		return normalizeEdgeRule(*v, path)
+	case map[string]any:
+		out = cloneMap(v)
+	default:
+		panic("Service " + path + " must be a railway.EdgeRule value or a map[string]any.")
+	}
+
+	if raw, ok := out["description"]; ok && raw != nil {
+		if _, isString := raw.(string); !isString {
+			panic("Service " + path + ".description must be a string.")
+		}
+	}
+	raw, ok := out["priority"]
+	if !ok || raw == nil {
+		panic("Service " + path + " is missing priority.")
+	}
+	priority, isInt := asInt(raw)
+	if !isInt {
+		panic("Service " + path + ".priority must be an integer.")
+	}
+	out["priority"] = priority
+	if raw, ok := out["enabled"]; ok && raw != nil {
+		if _, isBool := raw.(bool); !isBool {
+			panic("Service " + path + ".enabled must be a bool.")
+		}
+	}
+	if raw, ok := out["mode"]; ok && raw != nil {
+		var mode string
+		switch m := raw.(type) {
+		case EdgeRuleMode:
+			mode = string(m)
+		case string:
+			mode = m
+		}
+		if EdgeRuleMode(mode) != EdgeRuleModeEnforce {
+			panic("Service " + path + ".mode must be \"enforce\", got " + strconv.Quote(mode) + ".")
+		}
+		out["mode"] = mode
+	}
+	if raw, ok := out["if"]; !ok || raw == nil {
+		panic("Service " + path + " is missing if.")
+	}
+	out["if"] = normalizeEdgeRuleExpr(out["if"], path+".if")
+	if raw, ok := out["then"]; !ok || raw == nil {
+		panic("Service " + path + " is missing then.")
+	}
+	out["then"] = normalizeEdgeRuleThen(out["then"], path+".then")
+	return prune(out)
+}
+
+func normalizeEdgeRuleExpr(value any, path string) map[string]any {
+	var out map[string]any
+	switch v := value.(type) {
+	case EdgeRuleExpr:
+		out = map[string]any{}
+		if v.And != nil {
+			out["and"] = v.And
+		}
+		if v.Or != nil {
+			out["or"] = v.Or
+		}
+		if v.Not != nil {
+			out["not"] = *v.Not
+		}
+		if v.Attr != "" || v.Op != "" || v.Value != nil || v.Key != "" {
+			out["attr"] = v.Attr
+			out["op"] = v.Op
+			out["value"] = v.Value
+			if v.Key != "" {
+				out["key"] = v.Key
+			}
+		}
+	case *EdgeRuleExpr:
+		if v == nil {
+			panic("Service " + path + " must not be nil.")
+		}
+		return normalizeEdgeRuleExpr(*v, path)
+	case map[string]any:
+		out = prune(cloneMap(v))
+	default:
+		panic("Service " + path + " must be a railway.EdgeRuleExpr value or a map[string]any.")
+	}
+
+	forms := 0
+	for _, key := range []string{"and", "or", "not"} {
+		if _, ok := out[key]; ok {
+			forms++
+		}
+	}
+	isClause := false
+	for _, key := range []string{"attr", "op", "value", "key"} {
+		if _, ok := out[key]; ok {
+			isClause = true
+		}
+	}
+	if isClause {
+		forms++
+	}
+	if forms != 1 {
+		panic("Service " + path + " must be one clause {attr, op, value} or exactly one of and, or, not.")
+	}
+
+	for _, key := range []string{"and", "or"} {
+		raw, ok := out[key]
+		if !ok {
+			continue
+		}
+		var children []any
+		switch list := raw.(type) {
+		case []EdgeRuleExpr:
+			for _, child := range list {
+				children = append(children, child)
+			}
+		case []map[string]any:
+			for _, child := range list {
+				children = append(children, child)
+			}
+		case []any:
+			children = list
+		default:
+			panic("Service " + path + "." + key + " must be a list of conditions.")
+		}
+		normalized := make([]any, 0, len(children))
+		for i, child := range children {
+			normalized = append(normalized, normalizeEdgeRuleExpr(child, path+"."+key+"["+strconv.Itoa(i)+"]"))
+		}
+		out[key] = normalized
+		return out
+	}
+	if raw, ok := out["not"]; ok {
+		out["not"] = normalizeEdgeRuleExpr(raw, path+".not")
+		return out
+	}
+
+	attr, _ := out["attr"].(string)
+	if attr == "" {
+		panic("Service " + path + ".attr must be a non-empty string.")
+	}
+	op, _ := out["op"].(string)
+	if op == "" {
+		panic("Service " + path + ".op must be a non-empty string.")
+	}
+	switch v := out["value"].(type) {
+	case string:
+	case []string:
+	case []any:
+		values := make([]string, 0, len(v))
+		for _, item := range v {
+			text, isString := item.(string)
+			if !isString {
+				panic("Service " + path + ".value must be a string or a list of strings.")
+			}
+			values = append(values, text)
+		}
+		out["value"] = values
+	default:
+		panic("Service " + path + ".value must be a string or a list of strings.")
+	}
+	if raw, ok := out["key"]; ok {
+		if _, isString := raw.(string); !isString {
+			panic("Service " + path + ".key must be a string.")
+		}
+	}
+	return out
+}
+
+func normalizeEdgeRuleThen(value any, path string) map[string]any {
+	var out map[string]any
+	switch v := value.(type) {
+	case EdgeRuleThen:
+		out = map[string]any{"action": v.Action}
+		if v.Params != nil {
+			out["params"] = cloneMap(v.Params)
+		}
+	case *EdgeRuleThen:
+		if v == nil {
+			panic("Service " + path + " must not be nil.")
+		}
+		return normalizeEdgeRuleThen(*v, path)
+	case map[string]any:
+		out = cloneMap(v)
+	default:
+		panic("Service " + path + " must be a railway.EdgeRuleThen value or a map[string]any.")
+	}
+
+	var action string
+	switch a := out["action"].(type) {
+	case EdgeRuleAction:
+		action = string(a)
+	case string:
+		action = a
+	}
+	switch EdgeRuleAction(action) {
+	case EdgeRuleActionBlock, EdgeRuleActionAllow, EdgeRuleActionChallenge, EdgeRuleActionRedirect, EdgeRuleActionCacheOverride:
+		out["action"] = action
+	default:
+		panic("Service " + path + ".action must be \"block\", \"allow\", \"challenge\", \"redirect\" or \"cache_override\", got " + strconv.Quote(action) + ".")
+	}
+	if raw, ok := out["params"]; ok && raw != nil {
+		params := asMap(raw)
+		if params == nil {
+			panic("Service " + path + ".params must be a map[string]any.")
+		}
+		out["params"] = params
+	}
+	return prune(out)
+}
+
 func Template(templateName string, options ...map[string]any) map[string]any {
 	out := map[string]any{"type": "template", "template": templateName}
 	for k, v := range firstMap(options) {
@@ -826,6 +1198,12 @@ func serviceNode(name string, config ServiceConfig) map[string]any {
 	// uncached service without a block, so no knobs is no block.
 	if cdn := normalizeServiceCdn(config["cdn"]); cdn != nil {
 		node["cdn"] = cdn
+	}
+	// Per-environment edge rules: see EdgeRules. Railway canonicalises the
+	// list (sorted by priority, defaults dropped), so it passes through as
+	// written; no rules is no list.
+	if edgeRules := normalizeEdgeRules(config["edgeRules"]); edgeRules != nil {
+		node["edgeRules"] = edgeRules
 	}
 	return node
 }
