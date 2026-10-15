@@ -331,6 +331,178 @@ func TestServiceCdn(t *testing.T) {
 	})
 }
 
+func TestEdgeRules(t *testing.T) {
+	expectPanic := func(name string, fn func()) {
+		t.Helper()
+		defer func() {
+			if recover() == nil {
+				t.Fatalf("%s: expected panic", name)
+			}
+		}()
+		fn()
+	}
+	rulesOf := func(svc Service) []any {
+		t.Helper()
+		rules, _ := svc.Graph()["edgeRules"].([]any)
+		return rules
+	}
+
+	// The CLI compiles `edgeRules` into `services[id].edgeRules` and backboard
+	// canonicalises the list (sorted by priority, defaults dropped), so the SDK
+	// passes it through verbatim rather than sorting or stripping defaults.
+	disabled := false
+	typed := ServiceNamed("web", ServiceConfig{"edgeRules": EdgeRules{
+		{
+			Description: "block the scanner",
+			Priority:    10,
+			Enabled:     &disabled,
+			Mode:        EdgeRuleModeEnforce,
+			If: EdgeRuleExpr{And: []EdgeRuleExpr{
+				{Attr: "http.path", Op: "matches", Value: "/admin/*"},
+				{Not: &EdgeRuleExpr{Attr: "ipv4.src", Op: "in", Value: []string{"10.0.0.0/8"}}},
+			}},
+			Then: EdgeRuleThen{Action: EdgeRuleActionBlock, Params: map[string]any{"status": 403}},
+		},
+		{
+			Priority: 0,
+			If:       EdgeRuleExpr{Attr: "http.header", Key: "x-canary", Op: "eq", Value: "1"},
+			Then:     EdgeRuleThen{Action: EdgeRuleActionCacheOverride, Params: map[string]any{"bypass": true}},
+		},
+	}})
+	want := []any{
+		map[string]any{
+			"description": "block the scanner",
+			"priority":    10,
+			"enabled":     false,
+			"mode":        "enforce",
+			"if": map[string]any{"and": []any{
+				map[string]any{"attr": "http.path", "op": "matches", "value": "/admin/*"},
+				map[string]any{"not": map[string]any{"attr": "ipv4.src", "op": "in", "value": []string{"10.0.0.0/8"}}},
+			}},
+			"then": map[string]any{"action": "block", "params": map[string]any{"status": 403}},
+		},
+		map[string]any{
+			"priority": 0,
+			"if":       map[string]any{"attr": "http.header", "key": "x-canary", "op": "eq", "value": "1"},
+			"then":     map[string]any{"action": "cache_override", "params": map[string]any{"bypass": true}},
+		},
+	}
+	if got := rulesOf(typed); !reflect.DeepEqual(got, want) {
+		t.Fatalf("typed edgeRules: %v", got)
+	}
+
+	// The raw list form `railway config pull` writes is normalised to the same graph.
+	raw := ServiceNamed("web", ServiceConfig{"edgeRules": []any{
+		map[string]any{
+			"description": "block the scanner",
+			"priority":    10.0, // JSON-decoded numbers are floats.
+			"enabled":     false,
+			"mode":        "enforce",
+			"if": map[string]any{"and": []any{
+				map[string]any{"attr": "http.path", "op": "matches", "value": "/admin/*"},
+				map[string]any{"not": map[string]any{"attr": "ipv4.src", "op": "in", "value": []any{"10.0.0.0/8"}}},
+			}},
+			"then": map[string]any{"action": "block", "params": map[string]any{"status": 403}},
+		},
+		map[string]any{
+			"priority": 0.0,
+			"if":       map[string]any{"attr": "http.header", "key": "x-canary", "op": "eq", "value": "1"},
+			"then":     map[string]any{"action": "cache_override", "params": map[string]any{"bypass": true}},
+		},
+	}})
+	if got := rulesOf(raw); !reflect.DeepEqual(got, want) {
+		t.Fatalf("raw edgeRules: %v", got)
+	}
+
+	// Functions carry the list too, and nothing is filled in for an omitted default.
+	worker := Fn("worker", ServiceConfig{"edgeRules": EdgeRules{{
+		Priority: 5,
+		If:       EdgeRuleExpr{Or: []EdgeRuleExpr{{Attr: "http.host", Op: "eq", Value: "a.example.com"}}},
+		Then:     EdgeRuleThen{Action: EdgeRuleActionAllow},
+	}}})
+	minimal := []any{map[string]any{
+		"priority": 5,
+		"if":       map[string]any{"or": []any{map[string]any{"attr": "http.host", "op": "eq", "value": "a.example.com"}}},
+		"then":     map[string]any{"action": "allow"},
+	}}
+	if worker.Graph()["kind"] != "function" || !reflect.DeepEqual(rulesOf(worker), minimal) {
+		t.Fatalf("function edgeRules: %v", worker.Graph())
+	}
+
+	// Unknown raw keys pass through so a newer `railway config pull` still evaluates.
+	future := ServiceNamed("web", ServiceConfig{"edgeRules": []any{map[string]any{
+		"priority": 1,
+		"if":       map[string]any{"attr": "http.host", "op": "eq", "value": "x"},
+		"then":     map[string]any{"action": "challenge"},
+		"tags":     []any{"bots"},
+	}}})
+	if got := rulesOf(future); len(got) != 1 || !reflect.DeepEqual(got[0].(map[string]any)["tags"], []any{"bots"}) {
+		t.Fatalf("unknown key: %v", got)
+	}
+
+	// No rules is no list.
+	for name, cfg := range map[string]ServiceConfig{
+		"absent":    {},
+		"nil":       {"edgeRules": nil},
+		"nil ptr":   {"edgeRules": (*EdgeRules)(nil)},
+		"empty":     {"edgeRules": EdgeRules{}},
+		"empty raw": {"edgeRules": []any{}},
+	} {
+		if _, ok := ServiceNamed("web", cfg).Graph()["edgeRules"]; ok {
+			t.Fatalf("%s: edgeRules should be dropped", name)
+		}
+	}
+	if _, ok := Postgres("db").Graph()["edgeRules"]; ok {
+		t.Fatalf("database carries edgeRules")
+	}
+
+	clause := EdgeRuleExpr{Attr: "http.host", Op: "eq", Value: "x"}
+	expectPanic("bad action", func() {
+		ServiceNamed("web", ServiceConfig{"edgeRules": EdgeRules{{If: clause, Then: EdgeRuleThen{Action: "drop"}}}})
+	})
+	expectPanic("bad mode", func() {
+		ServiceNamed("web", ServiceConfig{"edgeRules": EdgeRules{{Mode: "monitor", If: clause, Then: EdgeRuleThen{Action: EdgeRuleActionAllow}}}})
+	})
+	expectPanic("empty condition", func() {
+		ServiceNamed("web", ServiceConfig{"edgeRules": EdgeRules{{If: EdgeRuleExpr{}, Then: EdgeRuleThen{Action: EdgeRuleActionAllow}}}})
+	})
+	expectPanic("clause and combinator", func() {
+		ServiceNamed("web", ServiceConfig{"edgeRules": EdgeRules{{
+			If:   EdgeRuleExpr{Attr: "http.host", Op: "eq", Value: "x", Not: &clause},
+			Then: EdgeRuleThen{Action: EdgeRuleActionAllow},
+		}}})
+	})
+	expectPanic("numeric value", func() {
+		ServiceNamed("web", ServiceConfig{"edgeRules": EdgeRules{{
+			If:   EdgeRuleExpr{Attr: "http.host", Op: "eq", Value: 1},
+			Then: EdgeRuleThen{Action: EdgeRuleActionAllow},
+		}}})
+	})
+	expectPanic("raw missing priority", func() {
+		ServiceNamed("web", ServiceConfig{"edgeRules": []any{map[string]any{
+			"if": map[string]any{"attr": "http.host", "op": "eq", "value": "x"}, "then": map[string]any{"action": "allow"},
+		}}})
+	})
+	expectPanic("raw fractional priority", func() {
+		ServiceNamed("web", ServiceConfig{"edgeRules": []any{map[string]any{
+			"priority": 1.5, "if": map[string]any{"attr": "http.host", "op": "eq", "value": "x"}, "then": map[string]any{"action": "allow"},
+		}}})
+	})
+	expectPanic("raw missing then", func() {
+		ServiceNamed("web", ServiceConfig{"edgeRules": []any{map[string]any{
+			"priority": 1, "if": map[string]any{"attr": "http.host", "op": "eq", "value": "x"},
+		}}})
+	})
+	expectPanic("raw bad params", func() {
+		ServiceNamed("web", ServiceConfig{"edgeRules": []any{map[string]any{
+			"priority": 1, "if": map[string]any{"attr": "http.host", "op": "eq", "value": "x"}, "then": map[string]any{"action": "block", "params": 403},
+		}}})
+	})
+	expectPanic("bad shape", func() {
+		ServiceNamed("web", ServiceConfig{"edgeRules": map[string]any{"priority": 1}})
+	})
+}
+
 func TestFnCodeFile(t *testing.T) {
 	code, err := os.ReadFile("testdata/hook.ts")
 	if err != nil {
