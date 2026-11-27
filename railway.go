@@ -77,6 +77,7 @@ func (r Resource) Env(output string) map[string]any {
 
 type Project struct {
 	Name      string
+	ID        string
 	Resources []any
 }
 
@@ -84,15 +85,24 @@ func ProjectNamed(name string, resources []any) Project {
 	return Project{Name: name, Resources: flatten(resources)}
 }
 
+// ProjectPinned names a project and pins its UUID. The name is only a label.
+func ProjectPinned(name, id string, resources []any) Project {
+	return Project{Name: name, ID: id, Resources: flatten(resources)}
+}
+
 func (p Project) Graph() map[string]any {
 	resources := make([]any, 0, len(p.Resources))
 	for _, r := range flatten(p.Resources) {
 		resources = append(resources, graphOf(r))
 	}
-	return map[string]any{
+	graph := map[string]any{
 		"name":      p.Name,
 		"resources": resources,
 	}
+	if p.ID != "" {
+		graph["id"] = p.ID
+	}
+	return graph
 }
 
 func Github(repo string, options ...map[string]any) map[string]any {
