@@ -41,6 +41,22 @@ func ExampleServiceCdn() {
 	// Output: {"defaultTtlSeconds":86400,"enabled":true,"htmlCaching":"force"}
 }
 
+func ExampleEdgeRules() {
+	web := railway.ServiceNamed("web", railway.ServiceConfig{
+		"edgeRules": railway.EdgeRules{{
+			Priority: 0,
+			If:       railway.EdgeRuleExpr{Attr: "http.host", Op: "eq", Value: "old.example.com"},
+			Then: railway.EdgeRuleThen{
+				Action: railway.EdgeRuleActionRedirect,
+				Params: map[string]any{"status": 301, "host": "example.com", "preserve_path": true},
+			},
+		}},
+	})
+	out, _ := json.Marshal(web.Graph()["edgeRules"])
+	fmt.Println(string(out))
+	// Output: [{"if":{"attr":"http.host","op":"eq","value":"old.example.com"},"priority":0,"then":{"action":"redirect","params":{"host":"example.com","preserve_path":true,"status":301}}}]
+}
+
 func ExampleFn() {
 	// Relative to this file: testdata/hook.ts next to example_test.go.
 	hook := railway.Fn("hook", railway.ServiceConfig{

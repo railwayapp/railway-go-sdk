@@ -36,7 +36,7 @@ module railway-config
 
 go 1.22
 
-require github.com/railwayapp/railway-go-sdk v0.6.0
+require github.com/railwayapp/railway-go-sdk v0.7.0
 ```
 
 Config as Code migration: `railway config migrate --lang go`.
@@ -123,6 +123,73 @@ way.
 
 Requires a Railway CLI that compiles `cdn`. Older CLIs drop the block when
 compiling the config.
+
+## Edge rules
+
+Edge rules are set per service and per environment. The edge evaluates them
+before a request reaches the service, so they apply without a deploy. Pass a
+`railway.EdgeRules` list as the `edgeRules` option of a service:
+
+```go
+web := railway.ServiceNamed("web", railway.ServiceConfig{
+  "edgeRules": railway.EdgeRules{
+    {
+      Description: "Keep the admin panel internal",
+      Priority:    0,
+      If: railway.EdgeRuleExpr{And: []railway.EdgeRuleExpr{
+        {Attr: "http.path", Op: "matches", Value: "/admin/*"},
+        {Not: &railway.EdgeRuleExpr{Attr: "ipv4.src", Op: "in", Value: []string{"10.0.0.0/8"}}},
+      }},
+      Then: railway.EdgeRuleThen{Action: railway.EdgeRuleActionBlock, Params: map[string]any{"status": 403}},
+    },
+    {
+      Priority: 10,
+      If:       railway.EdgeRuleExpr{Attr: "http.host", Op: "eq", Value: "old.example.com"},
+      Then: railway.EdgeRuleThen{
+        Action: railway.EdgeRuleActionRedirect,
+        Params: map[string]any{"status": 301, "host": "example.com", "preserve_path": true},
+      },
+    },
+  },
+})
+```
+
+Each rule has a `Priority` (evaluation order, lowest first, unique within the
+service), a condition in `If` and an action in `Then`. `Description` is free
+text, `Enabled` is a `*bool` because the default is `true` (`nil` leaves the
+default, `false` keeps a rule without evaluating it), and `Mode` is
+`railway.EdgeRuleModeEnforce`, the only mode today; empty leaves the default.
+Rules carry no id: the edge assigns one, and an update keeps a live rule's id
+when the priority matches.
+
+`If` is one clause or exactly one combinator:
+
+- A clause sets `Attr`, `Op`, `Value` and, for headers, `Key`. `Attr` is
+  `ipv4.src`, `http.host`, `http.path` or `http.header` (with `Key` naming the
+  header). `Op` is `eq`, `neq`, `in`, `not_in`, `contains` or `matches`
+  (glob), as the attribute allows. `Value` is a `string`, or a `[]string` for
+  `in` and `not_in`.
+- `And`, `Or` (each a `[]railway.EdgeRuleExpr`) and `Not` (a
+  `*railway.EdgeRuleExpr`) combine them.
+
+`Then.Action` is `railway.EdgeRuleActionBlock`, `Allow`, `Challenge`,
+`Redirect` or `CacheOverride`, with `Params` per action: `status` and `body`
+for `block`; `status` and either `location` or `host` (plus `preserve_path`
+and `preserve_query`) for `redirect`; `ttl_seconds` or `bypass` for
+`cache_override`. The SDK types `Params` loosely as a `map[string]any`; the
+edge validates the whole ruleset when the change is committed and rejects an
+invalid one with its diagnostics.
+
+Railway serialises the list sorted by `Priority`, without `Enabled` when true
+or `Mode` when `enforce`, so a reordered or default-laden copy of the live
+rules does not plan as drift. Leaving the key out, an empty list and `nil` all
+mean the same thing: no rules. The list is replaced as a whole, and rules need
+a plan with an edge-rules budget and a service with a domain. The raw
+`[]any` of `map[string]any` form that `railway config pull` writes out is
+accepted and validated the same way.
+
+Requires a Railway CLI that compiles `edgeRules`. Older CLIs drop the list
+when compiling the config.
 
 ## Functions
 
